@@ -495,6 +495,21 @@ impl Coordinator for CoordinatorService {
         request: Request<CheckpointInfo>,
     ) -> Result<Response<CheckpointAck>, Status> {
         let info = request.into_inner();
+        
+        // Validate required fields
+        if info.checkpoint_id.is_empty() {
+            return Err(Status::invalid_argument("checkpoint_id cannot be empty"));
+        }
+        if info.worker_id.is_empty() {
+            return Err(Status::invalid_argument("worker_id cannot be empty"));
+        }
+        if info.step < 0 {
+            return Err(Status::invalid_argument("step must be non-negative"));
+        }
+        if info.size_bytes < 0 {
+            return Err(Status::invalid_argument("size_bytes must be non-negative"));
+        }
+        
         info!(
             worker_id = %info.worker_id,
             checkpoint_id = %info.checkpoint_id,

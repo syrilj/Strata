@@ -359,7 +359,18 @@ impl CheckpointManager {
             metadata,
         };
 
-        self.checkpoints.write().insert(step, checkpoint_metadata);
+        let mut checkpoints = self.checkpoints.write();
+        // Check if a checkpoint already exists at this step and log a warning
+        if checkpoints.contains_key(&step) {
+            tracing::warn!(
+                checkpoint_id = %checkpoint_id,
+                step = step,
+                "Overwriting existing checkpoint at step"
+            );
+        }
+        checkpoints.insert(step, checkpoint_metadata);
+        drop(checkpoints);
+        
         info!(
             checkpoint_id = %checkpoint_id,
             step = step,

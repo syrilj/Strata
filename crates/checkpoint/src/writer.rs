@@ -63,7 +63,9 @@ impl AsyncCheckpointWriter {
         compression: bool,
         event_tx: mpsc::Sender<WriterEvent>,
     ) -> Result<(mpsc::Sender<WriteRequest>, Self)> {
-        let (tx, rx) = mpsc::channel::<WriteRequest>(buffer_size / (1024 * 1024));
+        // Ensure minimum channel capacity of 1 to prevent blocking
+        let channel_capacity = (buffer_size / (1024 * 1024)).max(1);
+        let (tx, rx) = mpsc::channel::<WriteRequest>(channel_capacity);
 
         let task = tokio::spawn(Self::writer_loop(rx, event_tx, compression));
 
