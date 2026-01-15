@@ -465,7 +465,7 @@ mod tests {
         // Test that trailing slashes are handled correctly
         let prefix = "data/";
         assert_eq!(make_s3_key(prefix, "file.bin"), "data/file.bin");
-        
+
         let prefix_no_slash = "data";
         assert_eq!(make_s3_key(prefix_no_slash, "file.bin"), "data/file.bin");
     }
@@ -492,7 +492,10 @@ mod tests {
 
         assert_eq!(config.bucket, "my-bucket");
         assert_eq!(config.prefix, Some("checkpoints/".to_string()));
-        assert_eq!(config.endpoint_url, Some("http://localhost:9000".to_string()));
+        assert_eq!(
+            config.endpoint_url,
+            Some("http://localhost:9000".to_string())
+        );
         assert_eq!(config.region, Some("us-west-2".to_string()));
         assert!(config.force_path_style);
     }

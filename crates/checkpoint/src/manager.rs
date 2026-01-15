@@ -3,9 +3,7 @@
 use bytes::Bytes;
 use chrono::Utc;
 use parking_lot::RwLock;
-use runtime_core::{
-    CheckpointId, CheckpointMetadata, CheckpointType, Epoch, Error, Result, Step,
-};
+use runtime_core::{CheckpointId, CheckpointMetadata, CheckpointType, Epoch, Error, Result, Step};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -111,7 +109,9 @@ impl CheckpointManager {
 
         // Shared state
         let checkpoints = Arc::new(RwLock::new(BTreeMap::new()));
-        let pending = Arc::new(RwLock::new(HashMap::<CheckpointId, PendingCheckpoint>::new()));
+        let pending = Arc::new(RwLock::new(
+            HashMap::<CheckpointId, PendingCheckpoint>::new(),
+        ));
         let base_path = config.base_path.clone();
         let keep_count = config.keep_count;
 
@@ -130,18 +130,21 @@ impl CheckpointManager {
         // Spawn event listener task
         let checkpoints_clone = checkpoints.clone();
         let pending_clone = pending.clone();
-        
+
         tokio::spawn(async move {
             debug!("Checkpoint event listener started");
             while let Some(event) = event_rx.recv().await {
                 match event {
-                    WriterEvent::Completed { checkpoint_id, size_bytes } => {
+                    WriterEvent::Completed {
+                        checkpoint_id,
+                        size_bytes,
+                    } => {
                         let mut pending_lock = pending_clone.write();
-                        
+
                         if let Some(entry) = pending_lock.get_mut(&checkpoint_id) {
                             entry.status = WriteStatus::Completed;
 
-                             // Create metadata and store
+                            // Create metadata and store
                             let metadata = CheckpointMetadata {
                                 id: checkpoint_id.clone(),
                                 step: entry.step,
@@ -158,16 +161,16 @@ impl CheckpointManager {
                             };
 
                             checkpoints_clone.write().insert(entry.step, metadata);
-                             info!(
+                            info!(
                                 checkpoint_id = %checkpoint_id,
                                 step = entry.step,
                                 size_bytes = size_bytes,
                                 "Checkpoint write completed"
                             );
-                            
+
                             // Cleanup old checkpoints
-                             let mut checkpoints_lock = checkpoints_clone.write();
-                             while checkpoints_lock.len() > keep_count {
+                            let mut checkpoints_lock = checkpoints_clone.write();
+                            while checkpoints_lock.len() > keep_count {
                                 if let Some((&step, _)) = checkpoints_lock.first_key_value() {
                                     if let Some(meta) = checkpoints_lock.remove(&step) {
                                         let path = meta.path.clone();
@@ -183,7 +186,10 @@ impl CheckpointManager {
                             }
                         }
                     }
-                    WriterEvent::Failed { checkpoint_id, error } => {
+                    WriterEvent::Failed {
+                        checkpoint_id,
+                        error,
+                    } => {
                         let mut pending_lock = pending_clone.write();
                         if let Some(entry) = pending_lock.get_mut(&checkpoint_id) {
                             entry.status = WriteStatus::Failed;
@@ -246,11 +252,12 @@ impl CheckpointManager {
         };
 
         // Send to async writer
-        self.write_tx.send(request).await.map_err(|e| {
-            Error::ChannelClosed {
+        self.write_tx
+            .send(request)
+            .await
+            .map_err(|e| Error::ChannelClosed {
                 channel: format!("checkpoint write channel: {}", e),
-            }
-        })?;
+            })?;
 
         debug!(checkpoint_id = %checkpoint_id, step = step, "Queued checkpoint for async write");
 
@@ -263,25 +270,25 @@ impl CheckpointManager {
 
         // Even if not in pending (e.g. from coordinator), we might want to register it
         // But typically we expect it to be in pending if we are tracking it
-        
+
         // If entry exists, update it. If not, we might be registering a remote checkpoint.
         // For now, let's assume if it's not in pending, we just add it to checkpoints directly?
-        // But PendingCheckpoint stores step/epoch. If we don't have it, we can't easily add to checkpoints map 
+        // But PendingCheckpoint stores step/epoch. If we don't have it, we can't easily add to checkpoints map
         // without more info.
         // However, the coordinator calls this after `NotifyCheckpoint`.
-        
+
         if let Some(entry) = pending.get_mut(checkpoint_id) {
             entry.status = WriteStatus::Completed;
             let step = entry.step;
             let epoch = entry.epoch;
-            
+
             // Allow releasing lock before acquiring checkpoints lock to avoid deadlock?
             // RwLock is reentrant? No. parking_lot::RwLock is not reentrant.
-            // But we are taking write lock on pending, then write lock on checkpoints. 
-            // We need to be careful about lock order. 
+            // But we are taking write lock on pending, then write lock on checkpoints.
+            // We need to be careful about lock order.
             // In listener we did: pending.write(), then checkpoints.write().
             // Here we should do the same.
-            
+
             // Create metadata and store
             let metadata = CheckpointMetadata {
                 id: checkpoint_id.to_string(),
@@ -313,7 +320,7 @@ impl CheckpointManager {
         } else {
             // Case for coordinator receiving notification for a checkpoint it didn't initiate?
             // If coordinator just uses this to track state, maybe it inserted a pending entry first?
-            // Let's check coordinator usage if possible, but for now restoring the logic 
+            // Let's check coordinator usage if possible, but for now restoring the logic
             // that relies on pending entry validation is safer.
             warn!(checkpoint_id = %checkpoint_id, "Attempted to mark unknown checkpoint as completed");
         }
@@ -336,7 +343,7 @@ impl CheckpointManager {
     }
 
     /// Register an external checkpoint (from remote workers via gRPC)
-    /// This is used when the coordinator receives a checkpoint notification 
+    /// This is used when the coordinator receives a checkpoint notification
     /// that it didn't initiate locally
     pub fn register_external_checkpoint(
         &self,
@@ -370,7 +377,7 @@ impl CheckpointManager {
         }
         checkpoints.insert(step, checkpoint_metadata);
         drop(checkpoints);
-        
+
         info!(
             checkpoint_id = %checkpoint_id,
             step = step,
@@ -385,11 +392,7 @@ impl CheckpointManager {
 
     /// Get the latest checkpoint
     pub fn latest(&self) -> Option<CheckpointMetadata> {
-        self.checkpoints
-            .read()
-            .values()
-            .last()
-            .cloned()
+        self.checkpoints.read().values().last().cloned()
     }
 
     /// Get checkpoint by step

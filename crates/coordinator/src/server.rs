@@ -72,7 +72,7 @@ impl CoordinatorServer {
 
         // Build the gRPC service
         let grpc_service = CoordinatorGrpcServer::new(self.service)
-            .max_decoding_message_size(64 * 1024 * 1024)  // 64MB
+            .max_decoding_message_size(64 * 1024 * 1024) // 64MB
             .max_encoding_message_size(64 * 1024 * 1024);
 
         // Build server

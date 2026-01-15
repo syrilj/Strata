@@ -27,11 +27,9 @@ use crate::http_api::{
     WorkerResponse,
 };
 use crate::proto::{
-    self,
-    coordinator_server::Coordinator,
-    BarrierRequest, BarrierResponse, CheckpointAck, CheckpointInfo, DatasetAck, DatasetInfo,
-    HeartbeatRequest, HeartbeatResponse, RecoveryRequest, RecoveryResponse, ShardAssignment,
-    ShardRequest, WorkerConfig, WorkerInfo,
+    self, coordinator_server::Coordinator, BarrierRequest, BarrierResponse, CheckpointAck,
+    CheckpointInfo, DatasetAck, DatasetInfo, HeartbeatRequest, HeartbeatResponse, RecoveryRequest,
+    RecoveryResponse, ShardAssignment, ShardRequest, WorkerConfig, WorkerInfo,
 };
 
 /// Active barrier tracking
@@ -75,7 +73,12 @@ pub struct CoordinatorService {
 impl CoordinatorService {
     /// Create a new coordinator service with default configuration
     pub async fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        Self::with_config(CheckpointManagerConfig::default(), 10000, Duration::from_secs(30)).await
+        Self::with_config(
+            CheckpointManagerConfig::default(),
+            10000,
+            Duration::from_secs(30),
+        )
+        .await
     }
 
     /// Create a new coordinator service with custom configuration
@@ -259,7 +262,7 @@ impl CoordinatorService {
         // Calculate actual metrics from tracked data
         let uptime = self.uptime_secs().max(1);
         let total_requests = self.request_count.load(Ordering::Relaxed);
-        
+
         MetricsResponse {
             // Checkpoint throughput: checkpoints per minute
             // Note: This is a placeholder until we implement checkpoint event tracking
@@ -473,7 +476,8 @@ impl Coordinator for CoordinatorService {
         // Return first shard (primary assignment)
         // In practice, a worker might request multiple shards
         if let Some(shard) = shards.first() {
-            let total_shards = (dataset_info.total_samples as f64 / dataset_info.shard_size as f64).ceil() as i64;
+            let total_shards =
+                (dataset_info.total_samples as f64 / dataset_info.shard_size as f64).ceil() as i64;
 
             Ok(Response::new(ShardAssignment {
                 dataset_id: req.dataset_id,
@@ -495,7 +499,7 @@ impl Coordinator for CoordinatorService {
         request: Request<CheckpointInfo>,
     ) -> Result<Response<CheckpointAck>, Status> {
         let info = request.into_inner();
-        
+
         // Validate required fields
         if info.checkpoint_id.is_empty() {
             return Err(Status::invalid_argument("checkpoint_id cannot be empty"));
@@ -509,7 +513,7 @@ impl Coordinator for CoordinatorService {
         if info.size_bytes < 0 {
             return Err(Status::invalid_argument("size_bytes must be non-negative"));
         }
-        
+
         info!(
             worker_id = %info.worker_id,
             checkpoint_id = %info.checkpoint_id,
@@ -522,7 +526,7 @@ impl Coordinator for CoordinatorService {
         // Register this checkpoint from the remote worker
         let mut metadata = info.metadata.clone();
         metadata.insert("worker_id".to_string(), info.worker_id.clone());
-        
+
         self.checkpoint_manager.register_external_checkpoint(
             &info.checkpoint_id,
             info.step as u64,
@@ -637,21 +641,23 @@ impl Coordinator for CoordinatorService {
                     arrived: AtomicU64::new(0),
                     waiters: parking_lot::Mutex::new(Vec::new()),
                 });
-                self.barriers.entry(req.barrier_id.clone()).or_insert_with(|| {
-                    info!(
-                        barrier_id = %req.barrier_id,
-                        expected = world_size,
-                        "Creating new barrier"
-                    );
-                    new_barrier.clone()
-                });
+                self.barriers
+                    .entry(req.barrier_id.clone())
+                    .or_insert_with(|| {
+                        info!(
+                            barrier_id = %req.barrier_id,
+                            expected = world_size,
+                            "Creating new barrier"
+                        );
+                        new_barrier.clone()
+                    });
                 self.barriers.get(&req.barrier_id).unwrap().clone()
             }
         };
 
         // Increment arrived counter
         let arrival_order = barrier_ref.arrived.fetch_add(1, Ordering::SeqCst) + 1;
-        
+
         info!(
             barrier_id = %req.barrier_id,
             worker_id = %req.worker_id,
@@ -726,8 +732,7 @@ impl Coordinator for CoordinatorService {
                             .map(|s| CoordinatorService::proto_to_core_state(s.state))
                             .unwrap_or(CoreWorkerState::Idle);
 
-                        let resources =
-                            CoordinatorService::proto_to_core_resources(hb.resources);
+                        let resources = CoordinatorService::proto_to_core_resources(hb.resources);
 
                         // Update worker state
                         if let Err(e) = workers.heartbeat(&hb.worker_id, state, resources) {

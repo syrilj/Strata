@@ -63,7 +63,11 @@ impl ConsistentHash {
         }
 
         nodes.push(node_id.to_string());
-        tracing::debug!(node = node_id, virtual_nodes = self.virtual_nodes, "Added node to hash ring");
+        tracing::debug!(
+            node = node_id,
+            virtual_nodes = self.virtual_nodes,
+            "Added node to hash ring"
+        );
     }
 
     /// Remove a node from the hash ring
@@ -107,11 +111,15 @@ impl ConsistentHash {
     }
 
     /// Get all shards assigned to a specific node
-    pub fn get_shards_for_node(&self, node_id: &str, dataset_id: &str, total_shards: u64) -> Vec<u64> {
+    pub fn get_shards_for_node(
+        &self,
+        node_id: &str,
+        dataset_id: &str,
+        total_shards: u64,
+    ) -> Vec<u64> {
         (0..total_shards)
             .filter(|&shard_id| {
-                self.get_node_for_shard(dataset_id, shard_id)
-                    .as_deref() == Some(node_id)
+                self.get_node_for_shard(dataset_id, shard_id).as_deref() == Some(node_id)
             })
             .collect()
     }
@@ -240,7 +248,7 @@ mod tests {
             .iter()
             .filter(|n| *n != "worker-2")
             .count();
-        
+
         let retention_rate = unchanged as f64 / originally_on_others as f64;
         assert!(
             retention_rate > 0.8,

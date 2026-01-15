@@ -3,8 +3,8 @@
 //! Manages epoch progression and shard shuffling for better model generalization.
 
 use dashmap::DashMap;
-use rand::SeedableRng;
 use rand::seq::SliceRandom;
+use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use runtime_core::types::{DatasetId, Epoch};
 use serde::{Deserialize, Serialize};
@@ -70,7 +70,12 @@ impl EpochCoordinator {
 
     /// Get shuffled shard indices for a specific epoch
     /// Uses deterministic shuffling based on epoch and seed
-    pub fn get_shuffled_shards(&self, dataset_id: &str, epoch: Epoch, total_shards: u64) -> Arc<Vec<u64>> {
+    pub fn get_shuffled_shards(
+        &self,
+        dataset_id: &str,
+        epoch: Epoch,
+        total_shards: u64,
+    ) -> Arc<Vec<u64>> {
         let key = (dataset_id.to_string(), epoch);
 
         // Check cache first
@@ -80,7 +85,7 @@ impl EpochCoordinator {
 
         // Generate shuffled order
         let mut shards: Vec<u64> = (0..total_shards).collect();
-        
+
         // Combine base seed, dataset ID, and epoch for unique but reproducible shuffling
         let epoch_seed = self.compute_epoch_seed(dataset_id, epoch);
         let mut rng = ChaCha8Rng::seed_from_u64(epoch_seed);
@@ -313,6 +318,8 @@ mod tests {
         coord.clear_cache("dataset-1");
 
         // dataset-2 cache should still exist
-        assert!(coord.shuffle_cache.contains_key(&("dataset-2".to_string(), 0)));
+        assert!(coord
+            .shuffle_cache
+            .contains_key(&("dataset-2".to_string(), 0)));
     }
 }

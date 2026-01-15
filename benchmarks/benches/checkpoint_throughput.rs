@@ -1,22 +1,22 @@
 //! Benchmarks for checkpoint write and read throughput
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput, BenchmarkId};
-use checkpoint::{CheckpointManager, CheckpointManagerConfig};
-use runtime_core::CheckpointType;
-use tempfile::TempDir;
 use bytes::Bytes;
-use std::path::PathBuf;
+use checkpoint::{CheckpointManager, CheckpointManagerConfig};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use runtime_core::CheckpointType;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use tempfile::TempDir;
 
 fn checkpoint_write_benchmark(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    
+
     let mut group = c.benchmark_group("checkpoint_write");
-    
+
     for size in [1_000_000, 10_000_000].iter() {
         group.throughput(Throughput::Bytes(*size as u64));
-        
+
         group.bench_function(format!("{}MB", size / 1_000_000), |b| {
             b.iter(|| {
                 rt.block_on(async {
@@ -29,28 +29,31 @@ fn checkpoint_write_benchmark(c: &mut Criterion) {
                         compression_level: 3,
                     };
                     let manager = CheckpointManager::new(config).await.unwrap();
-                    
+
                     let data = vec![0u8; *size];
-                    manager.save_async(
-                        Bytes::from(data),
-                        0, // step
-                        0, // epoch
-                        CheckpointType::Full,
-                        HashMap::new(),
-                    ).await.unwrap();
+                    manager
+                        .save_async(
+                            Bytes::from(data),
+                            0, // step
+                            0, // epoch
+                            CheckpointType::Full,
+                            HashMap::new(),
+                        )
+                        .await
+                        .unwrap();
                 });
             });
         });
     }
-    
+
     group.finish();
 }
 
 fn checkpoint_concurrent_writes(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    
+
     let mut group = c.benchmark_group("checkpoint_concurrent");
-    
+
     for num_workers in [1, 4, 8].iter() {
         group.bench_with_input(
             BenchmarkId::from_parameter(num_workers),
@@ -67,23 +70,26 @@ fn checkpoint_concurrent_writes(c: &mut Criterion) {
                             compression_level: 3,
                         };
                         let manager = Arc::new(CheckpointManager::new(config).await.unwrap());
-                        
+
                         let mut handles = vec![];
                         for i in 0..workers {
                             let manager_ref = manager.clone();
                             let handle = tokio::spawn(async move {
                                 let data = vec![0u8; 1_000_000];
-                                manager_ref.save_async(
-                                    Bytes::from(data),
-                                    i as u64, // step
-                                    i as u64, // epoch
-                                    CheckpointType::Full,
-                                    HashMap::new(),
-                                ).await.unwrap();
+                                manager_ref
+                                    .save_async(
+                                        Bytes::from(data),
+                                        i as u64, // step
+                                        i as u64, // epoch
+                                        CheckpointType::Full,
+                                        HashMap::new(),
+                                    )
+                                    .await
+                                    .unwrap();
                             });
                             handles.push(handle);
                         }
-                        
+
                         for handle in handles {
                             handle.await.unwrap();
                         }
@@ -92,7 +98,7 @@ fn checkpoint_concurrent_writes(c: &mut Criterion) {
             },
         );
     }
-    
+
     group.finish();
 }
 

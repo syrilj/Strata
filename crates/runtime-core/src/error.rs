@@ -16,7 +16,10 @@ pub enum Error {
     WorkerAlreadyRegistered { worker_id: String },
 
     #[error("Worker heartbeat timeout: {worker_id} (last seen {last_seen_ms}ms ago)")]
-    WorkerHeartbeatTimeout { worker_id: String, last_seen_ms: u64 },
+    WorkerHeartbeatTimeout {
+        worker_id: String,
+        last_seen_ms: u64,
+    },
 
     #[error("Worker in invalid state: expected {expected:?}, got {actual:?}")]
     InvalidWorkerState {
@@ -32,7 +35,10 @@ pub enum Error {
     CheckpointWriteFailed { message: String },
 
     #[error("Checkpoint corrupted: {checkpoint_id} - {reason}")]
-    CheckpointCorrupted { checkpoint_id: String, reason: String },
+    CheckpointCorrupted {
+        checkpoint_id: String,
+        reason: String,
+    },
 
     #[error("No valid checkpoint found for recovery")]
     NoCheckpointForRecovery,
