@@ -23,11 +23,11 @@ static STOPPED_TASKS: OnceLock<DashMap<String, i64>> = OnceLock::new();
 static TASK_STORE: OnceLock<DashMap<String, TaskResponse>> = OnceLock::new();
 
 fn get_stopped_tasks() -> &'static DashMap<String, i64> {
-    STOPPED_TASKS.get_or_init(|| DashMap::new())
+    STOPPED_TASKS.get_or_init(DashMap::new)
 }
 
 fn get_task_store() -> &'static DashMap<String, TaskResponse> {
-    TASK_STORE.get_or_init(|| DashMap::new())
+    TASK_STORE.get_or_init(DashMap::new)
 }
 
 /// Shared state for HTTP handlers (Arc for thread-safe sharing)
@@ -315,7 +315,7 @@ async fn create_task(
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
     
-    let task_id = format!("task_{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
+    let task_id = format!("task_{}", &uuid::Uuid::new_v4().to_string()[..8]);
     
     tracing::info!(
         task_id = %task_id,
@@ -435,7 +435,7 @@ fn get_demo_dashboard_state(uptime: u64) -> DashboardState {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
     
     // Simulate training progress based on uptime
-    let base_step = (uptime / 3) as u64; // Progress every 3 seconds
+    let base_step = uptime / 3; // Progress every 3 seconds
     let current_epoch = (base_step / 500) + 1; // New epoch every 500 steps
     let current_step = base_step % 500;
     
@@ -554,12 +554,12 @@ fn get_demo_dashboard_state(uptime: u64) -> DashboardState {
     };
     
     let metrics = MetricsResponse {
-        checkpoint_throughput: 45 + (uptime % 20) as u64,
-        coordinator_rps: 120 + (uptime % 30) as u64,
+        checkpoint_throughput: 45 + (uptime % 20),
+        coordinator_rps: 120 + (uptime % 30),
         active_workers: workers.iter().filter(|w| w.status == "active").count() as u32,
         total_workers: workers.len() as u32,
-        barrier_latency_p99: 20 + (uptime % 15) as u64,
-        shard_assignment_time: 8 + (uptime % 5) as u64,
+        barrier_latency_p99: 20 + (uptime % 15),
+        shard_assignment_time: 8 + (uptime % 5),
     };
     
     DashboardState {
@@ -685,7 +685,7 @@ fn get_demo_logs(uptime: u64) -> Vec<LogResponse> {
     for (i, (level, source, message, task_id, worker_id)) in log_entries.iter().enumerate() {
         let timestamp = now - ((log_entries.len() - i) * 30000) as i64; // 30 seconds apart
         logs.push(LogResponse {
-            id: format!("log_{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
+            id: format!("log_{}", &uuid::Uuid::new_v4().to_string()[..8]),
             timestamp,
             level: level.to_string(),
             message: message.to_string(),
@@ -698,7 +698,7 @@ fn get_demo_logs(uptime: u64) -> Vec<LogResponse> {
     // Add some recent logs based on uptime
     if uptime > 0 {
         logs.push(LogResponse {
-            id: format!("log_{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
+            id: format!("log_{}", &uuid::Uuid::new_v4().to_string()[..8]),
             timestamp: now - 5000,
             level: "info".to_string(),
             message: format!("System uptime: {}s, {} active workers", uptime, 2),

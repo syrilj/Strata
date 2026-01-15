@@ -4,7 +4,6 @@
 
 use data_shard::ShardManager;
 use pyo3::prelude::*;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Information about a shard assignment

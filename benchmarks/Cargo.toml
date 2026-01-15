@@ -9,6 +9,7 @@ checkpoint = { path = "../crates/checkpoint" }
 coordinator = { path = "../crates/coordinator" }
 data-shard = { path = "../crates/data-shard" }
 storage = { path = "../crates/storage" }
+runtime-core = { path = "../crates/runtime-core" }
 tokio = { workspace = true }
 bytes = { workspace = true }
 uuid = { workspace = true }

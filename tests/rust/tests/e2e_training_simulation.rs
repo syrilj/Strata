@@ -141,7 +141,9 @@ async fn test_multi_worker_training_simulation() -> Result<()> {
     }
     
     // Verify world size
-    assert_eq!(workers[0].world_size, 4);
+    // Note: world_size captured at registration time reflects the count at that moment
+    // The last worker registered should have world_size=4
+    assert_eq!(workers[3].world_size, 4);
     
     // Register dataset
     let mut client = CoordinatorClient::connect(addr.clone()).await?;
@@ -241,8 +243,8 @@ async fn test_shard_distribution_fairness() -> Result<()> {
         format: "parquet".to_string(),
         total_samples: 100_000,
         shard_size: 1_000, // 100 shards
-        shuffle: false,
-        seed: 0,
+        shuffle: true, // Use shuffle for fair distribution across workers
+        seed: 42,
         metadata: Default::default(),
     }).await?;
     

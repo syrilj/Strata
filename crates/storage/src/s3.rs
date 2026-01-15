@@ -209,7 +209,7 @@ impl S3Storage {
                 .await
                 .map_err(|e| {
                     // Attempt to abort the upload on failure
-                    let _ = self.abort_multipart_upload(key, upload_id);
+                    self.abort_multipart_upload(key, upload_id);
                     Error::Storage {
                         message: format!("Failed to upload part {}: {}", part_number, e),
                     }

@@ -1,7 +1,7 @@
 //! Benchmarks for data loading and shard assignment
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput, BenchmarkId};
-use data_shard::{ShardManager, Epoch, ConsistentHash};
+use data_shard::{ShardManager, ConsistentHash};
 use std::collections::HashMap;
 
 fn bench_shard_assignment(c: &mut Criterion) {
@@ -19,10 +19,16 @@ fn bench_shard_assignment(c: &mut Criterion) {
                 &(num_workers, total_shards),
                 |b, &(&workers, &shards)| {
                     b.iter(|| {
-                        let manager = ShardManager::new("dataset-1", shards);
+                        let manager = ShardManager::new();
+                        manager.register_dataset_params("dataset-1", shards as u64 * 1000, 1000, true, 42);
                         
                         for i in 0..workers {
-                            manager.assign_shards(0, &format!("worker-{}", i));
+                            manager.register_worker(&format!("worker-{}", i));
+                        }
+                        
+                        // Get shard assignments for all workers
+                        for i in 0..workers {
+                            manager.get_shard_for_worker("dataset-1", &format!("worker-{}", i), 0);
                         }
                     });
                 },
@@ -38,11 +44,16 @@ fn bench_epoch_management(c: &mut Criterion) {
     
     group.bench_function("create_and_track_100_epochs", |b| {
         b.iter(|| {
-            let manager = ShardManager::new("dataset-1", 1000);
+            let manager = ShardManager::new();
+            manager.register_dataset_params("dataset-1", 100000, 100, true, 42);
             
-            for epoch in 0..100 {
+            for i in 0..10 {
+                manager.register_worker(&format!("worker-{}", i));
+            }
+            
+            for epoch in 0..100u64 {
                 for worker in 0..10 {
-                    manager.assign_shards(epoch, &format!("worker-{}", worker));
+                    manager.get_shard_for_worker("dataset-1", &format!("worker-{}", worker), epoch);
                 }
             }
         });
@@ -69,9 +80,10 @@ fn bench_consistent_hash_distribution(c: &mut Criterion) {
                     
                     // Distribute 10000 shards
                     let mut distribution: HashMap<String, usize> = HashMap::new();
-                    for shard in 0..10000 {
-                        let node = ring.get_node_for_shard("dataset-1", shard).unwrap();
-                        *distribution.entry(node.to_string()).or_insert(0) += 1;
+                    for shard in 0u64..10000 {
+                        if let Some(node) = ring.get_node_for_shard("dataset-1", shard) {
+                            *distribution.entry(node.to_string()).or_insert(0) += 1;
+                        }
                     }
                     
                     distribution
@@ -96,20 +108,22 @@ fn bench_shard_rebalancing(c: &mut Criterion) {
             }
             
             // Calculate initial distribution
-            let mut before: HashMap<String, Vec<usize>> = HashMap::new();
-            for shard in 0..10000 {
-                let node = ring.get_node_for_shard("dataset-1", shard).unwrap();
-                before.entry(node.to_string()).or_insert_with(Vec::new).push(shard);
+            let mut before: HashMap<String, Vec<u64>> = HashMap::new();
+            for shard in 0u64..10000 {
+                if let Some(node) = ring.get_node_for_shard("dataset-1", shard) {
+                    before.entry(node.to_string()).or_default().push(shard);
+                }
             }
             
             // Add new worker
             ring.add_node("worker-new");
             
             // Calculate new distribution
-            let mut after: HashMap<String, Vec<usize>> = HashMap::new();
-            for shard in 0..10000 {
-                let node = ring.get_node_for_shard("dataset-1", shard).unwrap();
-                after.entry(node.to_string()).or_insert_with(Vec::new).push(shard);
+            let mut after: HashMap<String, Vec<u64>> = HashMap::new();
+            for shard in 0u64..10000 {
+                if let Some(node) = ring.get_node_for_shard("dataset-1", shard) {
+                    after.entry(node.to_string()).or_default().push(shard);
+                }
             }
             
             // Count moved shards
@@ -138,23 +152,31 @@ fn bench_parallel_shard_access(c: &mut Criterion) {
             BenchmarkId::from_parameter(num_threads),
             num_threads,
             |b, &threads| {
-                b.to_async(&rt).iter(|| async move {
-                    let manager = std::sync::Arc::new(ShardManager::new("dataset-1", 10000));
-                    let mut handles = vec![];
-                    
-                    for i in 0..threads {
-                        let manager = manager.clone();
-                        let handle = tokio::spawn(async move {
-                            for epoch in 0..10 {
-                                manager.assign_shards(epoch, &format!("worker-{}", i));
-                            }
-                        });
-                        handles.push(handle);
-                    }
-                    
-                    for handle in handles {
-                        handle.await.unwrap();
-                    }
+                b.iter(|| {
+                    rt.block_on(async {
+                        let manager = std::sync::Arc::new(ShardManager::new());
+                        manager.register_dataset_params("dataset-1", 100000, 10, true, 42);
+                        
+                        for i in 0..threads {
+                            manager.register_worker(&format!("worker-{}", i));
+                        }
+                        
+                        let mut handles = vec![];
+                        
+                        for i in 0..threads {
+                            let manager = manager.clone();
+                            let handle = tokio::spawn(async move {
+                                for epoch in 0..10u64 {
+                                    manager.get_shard_for_worker("dataset-1", &format!("worker-{}", i), epoch);
+                                }
+                            });
+                            handles.push(handle);
+                        }
+                        
+                        for handle in handles {
+                            handle.await.unwrap();
+                        }
+                    });
                 });
             },
         );

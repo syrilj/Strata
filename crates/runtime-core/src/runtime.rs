@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::broadcast;
-use tracing::{error, info};
+use tracing::info;
 
 /// Shutdown signal sender
 pub type ShutdownSender = broadcast::Sender<()>;

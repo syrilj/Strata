@@ -4,7 +4,7 @@ use bytes::Bytes;
 use chrono::Utc;
 use parking_lot::RwLock;
 use runtime_core::{
-    CheckpointId, CheckpointMetadata, CheckpointType, Epoch, Error, Result, Step, WorkerId,
+    CheckpointId, CheckpointMetadata, CheckpointType, Epoch, Error, Result, Step,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -333,6 +333,43 @@ impl CheckpointManager {
                 "Checkpoint write failed"
             );
         }
+    }
+
+    /// Register an external checkpoint (from remote workers via gRPC)
+    /// This is used when the coordinator receives a checkpoint notification 
+    /// that it didn't initiate locally
+    pub fn register_external_checkpoint(
+        &self,
+        checkpoint_id: &str,
+        step: Step,
+        epoch: Epoch,
+        path: &str,
+        size_bytes: u64,
+        metadata: HashMap<String, String>,
+    ) {
+        let checkpoint_metadata = CheckpointMetadata {
+            id: checkpoint_id.to_string(),
+            step,
+            epoch,
+            path: path.to_string(),
+            size_bytes,
+            created_at: Utc::now(),
+            checkpoint_type: CheckpointType::Full,
+            model_hash: None,
+            metadata,
+        };
+
+        self.checkpoints.write().insert(step, checkpoint_metadata);
+        info!(
+            checkpoint_id = %checkpoint_id,
+            step = step,
+            epoch = epoch,
+            size_bytes = size_bytes,
+            "External checkpoint registered"
+        );
+
+        // Cleanup old checkpoints
+        self.cleanup_old_checkpoints();
     }
 
     /// Get the latest checkpoint

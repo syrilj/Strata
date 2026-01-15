@@ -271,7 +271,7 @@ mod tests {
 
         for (node, count) in counts {
             assert!(
-                (count as i64 - expected as i64).unsigned_abs() < tolerance as u64,
+                (count as i64 - expected as i64).unsigned_abs() < tolerance,
                 "Node {} got {} shards, expected ~{} (±{})",
                 node,
                 count,

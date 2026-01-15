@@ -90,7 +90,7 @@ impl ShardManager {
         shuffle: bool,
         seed: u64,
     ) {
-        let total_shards = (total_samples + shard_size - 1) / shard_size;
+        let total_shards = total_samples.div_ceil(shard_size);
         
         let metadata = DatasetMetadata {
             id: dataset_id.to_string(),
@@ -240,7 +240,7 @@ impl ShardManager {
                 if let Some(assignments) = self.get_shard_for_worker(dataset_id, worker_id, epoch) {
                     let worker_map = result
                         .entry(worker_id.clone())
-                        .or_insert_with(DashMap::new);
+                        .or_default();
                     
                     worker_map.insert(
                         dataset_id.clone(),
@@ -368,7 +368,7 @@ mod tests {
             path: "/data/test".to_string(),
             format: "parquet".to_string(),
             total_samples,
-            total_shards: (total_samples + shard_size - 1) / shard_size,
+            total_shards: total_samples.div_ceil(shard_size),
             shard_size,
             shuffle: true,
             seed: 42,

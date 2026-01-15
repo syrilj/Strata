@@ -251,7 +251,7 @@ impl InputValidator {
 
     /// Validate port number
     pub fn validate_port(&self, port: i32) -> Result<(), Status> {
-        if port < 1 || port > 65535 {
+        if !(1..=65535).contains(&port) {
             return Err(Status::invalid_argument(
                 "Port must be between 1 and 65535"
             ));
@@ -307,7 +307,7 @@ impl RequestMetrics {
 
     /// Record latency
     pub fn record_latency(&self, method: &str, latency_us: u64) {
-        let mut entry = self.latencies.entry(method.to_string()).or_insert_with(Vec::new);
+        let mut entry = self.latencies.entry(method.to_string()).or_default();
         if entry.len() >= self.max_samples {
             entry.remove(0);
         }

@@ -13,7 +13,7 @@ use dashmap::DashMap;
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use checkpoint::{CheckpointManager, CheckpointManagerConfig, CheckpointManagerHandle};
 use data_shard::ShardManager;
@@ -504,22 +504,18 @@ impl Coordinator for CoordinatorService {
             "Checkpoint notification"
         );
 
-        // For now, we just acknowledge the checkpoint
-        // In a full implementation, we might track per-worker checkpoint status
-        // and coordinate global checkpoints
-
-        // If this worker reports the checkpoint, mark it as completed
-        // This is a simplified model - real systems would wait for all workers
-        if let Err(e) = self
-            .checkpoint_manager
-            .mark_completed(&info.checkpoint_id, info.size_bytes as u64)
-        {
-            warn!(
-                checkpoint_id = %info.checkpoint_id,
-                error = %e,
-                "Failed to mark checkpoint complete (may not exist in manager)"
-            );
-        }
+        // Register this checkpoint from the remote worker
+        let mut metadata = info.metadata.clone();
+        metadata.insert("worker_id".to_string(), info.worker_id.clone());
+        
+        self.checkpoint_manager.register_external_checkpoint(
+            &info.checkpoint_id,
+            info.step as u64,
+            info.epoch as u64,
+            &info.storage_path,
+            info.size_bytes as u64,
+            metadata,
+        );
 
         Ok(Response::new(CheckpointAck {
             success: true,
