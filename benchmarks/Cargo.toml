@@ -1,0 +1,33 @@
+[package]
+name = "benchmarks"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+checkpoint = { path = "../crates/checkpoint" }
+coordinator = { path = "../crates/coordinator" }
+data-shard = { path = "../crates/data-shard" }
+storage = { path = "../crates/storage" }
+tokio = { workspace = true }
+bytes = { workspace = true }
+uuid = { workspace = true }
+tempfile = { workspace = true }
+portpicker = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "checkpoint_throughput"
+harness = false
+
+[[bench]]
+name = "coordinator"
+harness = false
+
+[[bench]]
+name = "data_loading"
+harness = false

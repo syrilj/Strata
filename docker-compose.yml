@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  # Coordinator server (Rust)
+  coordinator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "50051:50051"   # gRPC
+      - "51051:51051"   # HTTP API for dashboard
+      - "3000:3000"     # Dashboard UI
+    environment:
+      - RUST_LOG=info,coordinator=debug
+      - CHECKPOINT_DIR=/data/checkpoints
+    volumes:
+      - checkpoint-data:/data/checkpoints
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:51051/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # Simulated workers - each trains on different stock data
+  worker-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      - COORDINATOR_URL=coordinator:50051
+      - WORKER_ID=gpu-node-1
+      - GPU_COUNT=4
+    depends_on:
+      coordinator:
+        condition: service_healthy
+
+  worker-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      - COORDINATOR_URL=coordinator:50051
+      - WORKER_ID=gpu-node-2
+      - GPU_COUNT=4
+    depends_on:
+      coordinator:
+        condition: service_healthy
+
+  worker-3:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      - COORDINATOR_URL=coordinator:50051
+      - WORKER_ID=gpu-node-3
+      - GPU_COUNT=4
+    depends_on:
+      coordinator:
+        condition: service_healthy
+
+  worker-4:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      - COORDINATOR_URL=coordinator:50051
+      - WORKER_ID=gpu-node-4
+      - GPU_COUNT=4
+    depends_on:
+      coordinator:
+        condition: service_healthy
+
+volumes:
+  checkpoint-data:
+
+networks:
+  default:
+    name: dtruntime-network

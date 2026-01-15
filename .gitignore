@@ -1,0 +1,60 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+dist/
+.cache/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Data and checkpoints
+/data/*
+!/data/.gitkeep
+/checkpoints/*.pt
+/checkpoints/*.ckpt
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+
+# Tool directories
+.agent/
+.qodo/
+.codacy/
+
+# Temporary files
+*.tmp
+*.temp
+CODE_QUALITY_AUDIT.md

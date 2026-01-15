@@ -1,0 +1,184 @@
+syntax = "proto3";
+
+package coordinator;
+
+// Worker information sent during registration
+message WorkerInfo {
+    string worker_id = 1;
+    string hostname = 2;
+    int32 port = 3;
+    int32 gpu_count = 4;
+    int64 memory_bytes = 5;
+    map<string, string> metadata = 6;
+}
+
+// Configuration returned to worker after registration
+message WorkerConfig {
+    string assigned_id = 1;
+    int32 rank = 2;
+    int32 world_size = 3;
+    int64 heartbeat_interval_ms = 4;
+    map<string, string> config = 5;
+}
+
+// Heartbeat messages for failure detection
+message HeartbeatRequest {
+    string worker_id = 1;
+    int64 timestamp_ms = 2;
+    WorkerStatus status = 3;
+    ResourceUsage resources = 4;
+}
+
+message HeartbeatResponse {
+    bool acknowledged = 1;
+    int64 server_timestamp_ms = 2;
+    repeated string pending_commands = 3;
+}
+
+message WorkerStatus {
+    enum State {
+        UNKNOWN = 0;
+        INITIALIZING = 1;
+        IDLE = 2;
+        LOADING_DATA = 3;
+        TRAINING = 4;
+        CHECKPOINTING = 5;
+        RECOVERING = 6;
+        ERROR = 7;
+    }
+    State state = 1;
+    int64 current_step = 2;
+    int64 current_epoch = 3;
+    string current_task = 4;
+}
+
+message ResourceUsage {
+    double cpu_percent = 1;
+    int64 memory_used_bytes = 2;
+    repeated GpuUsage gpu_usage = 3;
+    int64 disk_read_bytes = 4;
+    int64 disk_write_bytes = 5;
+    int64 network_rx_bytes = 6;
+    int64 network_tx_bytes = 7;
+}
+
+message GpuUsage {
+    int32 gpu_id = 1;
+    double utilization_percent = 2;
+    int64 memory_used_bytes = 3;
+    int64 memory_total_bytes = 4;
+    double temperature_celsius = 5;
+}
+
+// Data sharding requests
+message ShardRequest {
+    string worker_id = 1;
+    string dataset_id = 2;
+    int64 epoch = 3;
+}
+
+message ShardAssignment {
+    string dataset_id = 1;
+    int64 shard_id = 2;
+    int64 total_shards = 3;
+    int64 start_index = 4;
+    int64 end_index = 5;
+    repeated string file_paths = 6;
+    int64 epoch = 7;
+}
+
+// Checkpoint coordination
+message CheckpointInfo {
+    string worker_id = 1;
+    string checkpoint_id = 2;
+    int64 step = 3;
+    int64 epoch = 4;
+    string storage_path = 5;
+    int64 size_bytes = 6;
+    int64 timestamp_ms = 7;
+    CheckpointType type = 8;
+    map<string, string> metadata = 9;
+}
+
+message CheckpointAck {
+    bool success = 1;
+    string checkpoint_id = 2;
+    string message = 3;
+    int64 global_step = 4;
+}
+
+enum CheckpointType {
+    FULL = 0;
+    INCREMENTAL = 1;
+    OPTIMIZER_ONLY = 2;
+    MODEL_ONLY = 3;
+}
+
+// Barrier synchronization
+message BarrierRequest {
+    string worker_id = 1;
+    string barrier_id = 2;
+    int64 step = 3;
+}
+
+message BarrierResponse {
+    bool released = 1;
+    string barrier_id = 2;
+    int64 participants = 3;
+    int64 arrival_order = 4;
+}
+
+// Dataset registration
+message DatasetInfo {
+    string dataset_id = 1;
+    string path = 2;
+    string format = 3;
+    int64 total_samples = 4;
+    int64 shard_size = 5;
+    bool shuffle = 6;
+    int64 seed = 7;
+    map<string, string> metadata = 8;
+}
+
+message DatasetAck {
+    bool success = 1;
+    string dataset_id = 2;
+    int64 total_shards = 3;
+    string message = 4;
+}
+
+// Recovery information
+message RecoveryRequest {
+    string worker_id = 1;
+    string job_id = 2;
+}
+
+message RecoveryResponse {
+    bool has_checkpoint = 1;
+    CheckpointInfo latest_checkpoint = 2;
+    int64 resume_step = 3;
+    int64 resume_epoch = 4;
+    repeated ShardAssignment shard_assignments = 5;
+}
+
+// Coordinator service definition
+service Coordinator {
+    // Worker lifecycle
+    rpc RegisterWorker(WorkerInfo) returns (WorkerConfig);
+    rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+    rpc DeregisterWorker(WorkerInfo) returns (WorkerConfig);
+    
+    // Dataset management
+    rpc RegisterDataset(DatasetInfo) returns (DatasetAck);
+    rpc GetDataShard(ShardRequest) returns (ShardAssignment);
+    
+    // Checkpoint coordination
+    rpc NotifyCheckpoint(CheckpointInfo) returns (CheckpointAck);
+    rpc GetLatestCheckpoint(RecoveryRequest) returns (RecoveryResponse);
+    
+    // Synchronization
+    rpc WaitBarrier(BarrierRequest) returns (BarrierResponse);
+    
+    // Streaming for real-time updates
+    rpc StreamHeartbeats(stream HeartbeatRequest) returns (stream HeartbeatResponse);
+}

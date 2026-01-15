@@ -1,0 +1,21 @@
+# Worker container for simulating distributed training
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies
+RUN pip install --no-cache-dir grpcio grpcio-tools protobuf
+
+# Copy proto file and generate Python code
+COPY proto/coordinator.proto /app/proto/
+RUN python -m grpc_tools.protoc \
+    -I/app/proto \
+    --python_out=/app/proto \
+    --grpc_python_out=/app/proto \
+    /app/proto/coordinator.proto
+
+# Copy the worker script
+COPY scripts/simulated_worker.py /app/worker.py
+
+# Run the worker
+CMD ["python", "/app/worker.py"]

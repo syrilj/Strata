@@ -1,0 +1,38 @@
+version: '3.8'
+
+# Production deployment with S3 storage
+# Usage: docker-compose -f docker-compose.prod.yml up -d
+
+services:
+  coordinator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "50051:50051"   # gRPC
+      - "51051:51051"   # HTTP API
+      - "3000:3000"     # Dashboard
+    environment:
+      - RUST_LOG=info
+      # Storage config
+      - STORAGE_BACKEND=s3
+      - CHECKPOINT_BUCKET=${CHECKPOINT_BUCKET}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:51051/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+
+networks:
+  default:
+    name: dtruntime-prod

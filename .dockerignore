@@ -1,0 +1,38 @@
+# Build artifacts
+target/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+node_modules/
+dashboard/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Tests (not needed in production image)
+tests/
+benchmarks/
+
+# CI/CD
+.github/
+.codacy/
+.qodo/
+.agent/
+
+# Misc
+*.log
+.DS_Store
+Thumbs.db

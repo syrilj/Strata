@@ -1,0 +1,48 @@
+# Production Configuration for Distributed Training Runtime
+# Copy this to config.toml and fill in your values
+
+[coordinator]
+# gRPC address for worker connections
+grpc_address = "0.0.0.0:50051"
+# HTTP API address for dashboard
+http_address = "0.0.0.0:51051"
+# Maximum number of workers
+max_workers = 1000
+# Heartbeat timeout (seconds) - mark worker dead after this
+heartbeat_timeout = 30
+
+[storage]
+# Storage backend: "local" or "s3"
+backend = "s3"
+
+[storage.local]
+# Path for local checkpoint storage (used if backend = "local")
+path = "./checkpoints"
+
+[storage.s3]
+# S3 bucket for checkpoints
+bucket = "your-checkpoint-bucket"
+# Optional prefix within bucket
+prefix = "distributed-training/"
+# AWS region
+region = "us-east-1"
+# Optional custom endpoint (for MinIO, LocalStack, etc.)
+# endpoint_url = "http://localhost:9000"
+# Force path-style addressing (required for MinIO)
+# force_path_style = true
+
+[checkpoint]
+# Number of checkpoints to keep
+keep_count = 5
+# Write buffer size (bytes)
+write_buffer_size = 67108864  # 64MB
+# Enable compression
+compression = true
+# Compression level (1-9)
+compression_level = 3
+
+[logging]
+# Log level: trace, debug, info, warn, error
+level = "info"
+# JSON format for production
+json = true
