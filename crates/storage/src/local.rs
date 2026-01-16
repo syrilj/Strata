@@ -68,11 +68,9 @@ impl StorageBackend for LocalStorage {
 
         match fs::read(&full_path).await {
             Ok(data) => Ok(Bytes::from(data)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Err(Error::StoragePathNotFound {
-                    path: path.to_string(),
-                })
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Error::StoragePathNotFound {
+                path: path.to_string(),
+            }),
             Err(e) => Err(Error::Storage {
                 message: format!("Failed to read {}: {}", path, e),
             }),
@@ -89,9 +87,11 @@ impl StorageBackend for LocalStorage {
 
         // Ensure parent directory exists
         if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent).await.map_err(|e| Error::Storage {
-                message: format!("Failed to create directory {:?}: {}", parent, e),
-            })?;
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| Error::Storage {
+                    message: format!("Failed to create directory {:?}: {}", parent, e),
+                })?;
         }
 
         // Write to temporary file
@@ -127,11 +127,9 @@ impl StorageBackend for LocalStorage {
 
         match fs::remove_file(&full_path).await {
             Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Err(Error::StoragePathNotFound {
-                    path: path.to_string(),
-                })
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Error::StoragePathNotFound {
+                path: path.to_string(),
+            }),
             Err(e) => Err(Error::Storage {
                 message: format!("Failed to delete {}: {}", path, e),
             }),
@@ -228,10 +226,7 @@ mod tests {
         let (_temp_dir, storage) = setup().await;
         let data = Bytes::from("nested content");
 
-        storage
-            .write("a/b/c/deep.txt", data.clone())
-            .await
-            .unwrap();
+        storage.write("a/b/c/deep.txt", data.clone()).await.unwrap();
 
         let read_data = storage.read("a/b/c/deep.txt").await.unwrap();
         assert_eq!(read_data, data);

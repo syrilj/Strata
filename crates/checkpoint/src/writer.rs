@@ -4,7 +4,6 @@ use bytes::Bytes;
 use runtime_core::{CheckpointType, Epoch, Error, Result, Step};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
@@ -64,7 +63,9 @@ impl AsyncCheckpointWriter {
         compression: bool,
         event_tx: mpsc::Sender<WriterEvent>,
     ) -> Result<(mpsc::Sender<WriteRequest>, Self)> {
-        let (tx, rx) = mpsc::channel::<WriteRequest>(buffer_size / (1024 * 1024).max(16));
+        // Ensure minimum channel capacity of 1 to prevent blocking
+        let channel_capacity = (buffer_size / (1024 * 1024)).max(1);
+        let (tx, rx) = mpsc::channel::<WriteRequest>(channel_capacity);
 
         let task = tokio::spawn(Self::writer_loop(rx, event_tx, compression));
 
@@ -91,7 +92,7 @@ impl AsyncCheckpointWriter {
                         path = %request.path.display(),
                         "Checkpoint written successfully"
                     );
-                    
+
                     let _ = event_tx
                         .send(WriterEvent::Completed {
                             checkpoint_id,
@@ -105,7 +106,7 @@ impl AsyncCheckpointWriter {
                         error = %e,
                         "Failed to write checkpoint"
                     );
-                    
+
                     let _ = event_tx
                         .send(WriterEvent::Failed {
                             checkpoint_id,
@@ -136,26 +137,26 @@ impl AsyncCheckpointWriter {
 
         // Ensure parent directory exists
         if let Some(parent) = request.path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| Error::Io(e))?;
+            tokio::fs::create_dir_all(parent).await.map_err(Error::Io)?;
         }
 
         // Write data
-        let mut file = File::create(&temp_path).await.map_err(|e| Error::Io(e))?;
+        let mut file = File::create(&temp_path).await.map_err(Error::Io)?;
 
         // Write header with metadata
         let header = Self::create_header(request, compression)?;
-        file.write_all(&header).await.map_err(|e| Error::Io(e))?;
+        file.write_all(&header).await.map_err(Error::Io)?;
 
         // Write data
-        file.write_all(&data).await.map_err(|e| Error::Io(e))?;
+        file.write_all(&data).await.map_err(Error::Io)?;
 
         // Sync to disk
-        file.sync_all().await.map_err(|e| Error::Io(e))?;
+        file.sync_all().await.map_err(Error::Io)?;
 
         // Atomic rename
         tokio::fs::rename(&temp_path, &request.path)
             .await
-            .map_err(|e| Error::Io(e))?;
+            .map_err(Error::Io)?;
 
         let size = header.len() as u64 + data.len() as u64;
         let elapsed = start.elapsed();
@@ -226,43 +227,48 @@ impl AsyncCheckpointWriter {
     /// Read checkpoint data from file
     pub async fn read_checkpoint_data(path: &PathBuf) -> Result<Bytes> {
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
-        
-        let mut file = File::open(path).await.map_err(|e| Error::Io(e))?;
-        
+
+        let mut file = File::open(path).await.map_err(Error::Io)?;
+
         // Read magic (4)
         let mut magic = [0u8; 4];
-        file.read_exact(&mut magic).await.map_err(|e| Error::Io(e))?;
-        
+        file.read_exact(&mut magic).await.map_err(Error::Io)?;
+
         if magic != CHECKPOINT_MAGIC {
             return Err(Error::Storage {
                 message: "Invalid checkpoint magic".to_string(),
             });
         }
-        
+
         // Read version (4)
-        let version = file.read_u32_le().await.map_err(|e| Error::Io(e))?;
+        let version = file.read_u32_le().await.map_err(Error::Io)?;
         if version != CHECKPOINT_VERSION {
-             warn!("Checkpoint version mismatch: expected {}, got {}", CHECKPOINT_VERSION, version);
+            warn!(
+                "Checkpoint version mismatch: expected {}, got {}",
+                CHECKPOINT_VERSION, version
+            );
         }
-        
+
         // Skip step (8), epoch (8), type (1), compressed (1)
         // 8+8+1+1 = 18 bytes
         let mut skipped = [0u8; 18];
-        file.read_exact(&mut skipped).await.map_err(|e| Error::Io(e))?;
-        
+        file.read_exact(&mut skipped).await.map_err(Error::Io)?;
+
         // Read data size (8)
-        let data_size = file.read_u64_le().await.map_err(|e| Error::Io(e))?;
-        
+        let data_size = file.read_u64_le().await.map_err(Error::Io)?;
+
         // Read metadata length (4)
-        let meta_len = file.read_u32_le().await.map_err(|e| Error::Io(e))?;
-        
+        let meta_len = file.read_u32_le().await.map_err(Error::Io)?;
+
         // Skip metadata
-        file.seek(std::io::SeekFrom::Current(meta_len as i64)).await.map_err(|e| Error::Io(e))?;
-        
+        file.seek(std::io::SeekFrom::Current(meta_len as i64))
+            .await
+            .map_err(Error::Io)?;
+
         // Read data
         let mut data = vec![0u8; data_size as usize];
-        file.read_exact(&mut data).await.map_err(|e| Error::Io(e))?;
-        
+        file.read_exact(&mut data).await.map_err(Error::Io)?;
+
         Ok(Bytes::from(data))
     }
 }

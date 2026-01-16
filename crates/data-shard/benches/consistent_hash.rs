@@ -1,6 +1,6 @@
 //! Benchmarks for consistent hash operations
 
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use data_shard::ConsistentHash;
 
 fn bench_add_node(c: &mut Criterion) {
@@ -18,9 +18,7 @@ fn bench_get_node(c: &mut Criterion) {
         ring.add_node(&format!("worker-{}", i));
     }
 
-    c.bench_function("get_node", |b| {
-        b.iter(|| ring.get_node("some-key-12345"))
-    });
+    c.bench_function("get_node", |b| b.iter(|| ring.get_node("some-key-12345")));
 }
 
 fn bench_get_shards_for_node(c: &mut Criterion) {
@@ -30,17 +28,15 @@ fn bench_get_shards_for_node(c: &mut Criterion) {
     }
 
     let mut group = c.benchmark_group("get_shards_for_node");
-    
+
     for total_shards in [100, 1000, 10000].iter() {
         group.bench_with_input(
             BenchmarkId::from_parameter(total_shards),
             total_shards,
-            |b, &shards| {
-                b.iter(|| ring.get_shards_for_node("worker-1", "dataset-1", shards))
-            },
+            |b, &shards| b.iter(|| ring.get_shards_for_node("worker-1", "dataset-1", shards)),
         );
     }
-    
+
     group.finish();
 }
 

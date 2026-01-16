@@ -4,7 +4,6 @@
 
 use data_shard::ShardManager;
 use pyo3::prelude::*;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Information about a shard assignment
@@ -132,7 +131,12 @@ impl DatasetRegistry {
     ///
     /// Returns:
     ///     List of ShardInfo objects assigned to this worker
-    fn get_shards(&self, dataset_id: &str, worker_id: &str, epoch: u64) -> PyResult<Vec<ShardInfo>> {
+    fn get_shards(
+        &self,
+        dataset_id: &str,
+        worker_id: &str,
+        epoch: u64,
+    ) -> PyResult<Vec<ShardInfo>> {
         let assignments = self
             .manager
             .get_shard_for_worker(dataset_id, worker_id, epoch)
@@ -166,10 +170,7 @@ impl DatasetRegistry {
     ///     The new epoch number
     fn advance_epoch(&self, dataset_id: &str) -> PyResult<u64> {
         self.manager.advance_epoch(dataset_id).ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err(format!(
-                "Dataset '{}' not found",
-                dataset_id
-            ))
+            pyo3::exceptions::PyValueError::new_err(format!("Dataset '{}' not found", dataset_id))
         })
     }
 

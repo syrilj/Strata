@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// Main runtime configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimeConfig {
     /// Coordinator settings
     pub coordinator: CoordinatorConfig,
@@ -20,18 +20,6 @@ pub struct RuntimeConfig {
 
     /// Network settings
     pub network: NetworkConfig,
-}
-
-impl Default for RuntimeConfig {
-    fn default() -> Self {
-        Self {
-            coordinator: CoordinatorConfig::default(),
-            worker: WorkerConfig::default(),
-            checkpoint: CheckpointConfig::default(),
-            storage: StorageConfig::default(),
-            network: NetworkConfig::default(),
-        }
-    }
 }
 
 /// Coordinator configuration

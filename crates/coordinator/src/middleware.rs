@@ -49,9 +49,10 @@ impl RateLimiter {
 
         let now = Instant::now();
 
-        let entry = self.buckets.entry(client_id.to_string()).or_insert_with(|| {
-            (AtomicU64::new(self.burst), RwLock::new(now))
-        });
+        let entry = self
+            .buckets
+            .entry(client_id.to_string())
+            .or_insert_with(|| (AtomicU64::new(self.burst), RwLock::new(now)));
 
         let (tokens, last_update) = entry.value();
 
@@ -182,7 +183,7 @@ impl InputValidator {
 
         if !self.id_pattern.is_match(id) {
             return Err(Status::invalid_argument(
-                "Dataset ID contains invalid characters"
+                "Dataset ID contains invalid characters",
             ));
         }
 
@@ -201,7 +202,7 @@ impl InputValidator {
         // Check for path traversal attempts
         if path.contains("..") {
             return Err(Status::invalid_argument(
-                "Path traversal sequences are not allowed"
+                "Path traversal sequences are not allowed",
             ));
         }
 
@@ -251,10 +252,8 @@ impl InputValidator {
 
     /// Validate port number
     pub fn validate_port(&self, port: i32) -> Result<(), Status> {
-        if port < 1 || port > 65535 {
-            return Err(Status::invalid_argument(
-                "Port must be between 1 and 65535"
-            ));
+        if !(1..=65535).contains(&port) {
+            return Err(Status::invalid_argument("Port must be between 1 and 65535"));
         }
         Ok(())
     }
@@ -307,7 +306,7 @@ impl RequestMetrics {
 
     /// Record latency
     pub fn record_latency(&self, method: &str, latency_us: u64) {
-        let mut entry = self.latencies.entry(method.to_string()).or_insert_with(Vec::new);
+        let mut entry = self.latencies.entry(method.to_string()).or_default();
         if entry.len() >= self.max_samples {
             entry.remove(0);
         }

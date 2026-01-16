@@ -185,7 +185,8 @@ impl TrainingOrchestrator {
                         ))
                     })?;
 
-                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> = client_lock.lock().await;
+                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> =
+                    client_lock.lock().await;
                 *guard = Some(CoordinatorClient::new(channel));
                 Ok(())
             })
@@ -226,7 +227,8 @@ impl TrainingOrchestrator {
 
         py.allow_threads(|| {
             self.runtime.block_on(async move {
-                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> = client_lock.lock().await;
+                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> =
+                    client_lock.lock().await;
                 let grpc_client = guard.as_mut().ok_or_else(|| {
                     pyo3::exceptions::PyRuntimeError::new_err("Not connected to coordinator")
                 })?;
@@ -279,7 +281,8 @@ impl TrainingOrchestrator {
 
         py.allow_threads(|| {
             self.runtime.block_on(async move {
-                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> = client_lock.lock().await;
+                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> =
+                    client_lock.lock().await;
                 let grpc_client = guard.as_mut().ok_or_else(|| {
                     pyo3::exceptions::PyRuntimeError::new_err("Not connected to coordinator")
                 })?;
@@ -299,10 +302,7 @@ impl TrainingOrchestrator {
                 };
 
                 let response = grpc_client.heartbeat(request).await.map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Heartbeat failed: {}",
-                        e
-                    ))
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("Heartbeat failed: {}", e))
                 })?;
 
                 Ok(response.into_inner().acknowledged)
@@ -338,7 +338,8 @@ impl TrainingOrchestrator {
 
         py.allow_threads(|| {
             self.runtime.block_on(async move {
-                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> = client_lock.lock().await;
+                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> =
+                    client_lock.lock().await;
                 let grpc_client = guard.as_mut().ok_or_else(|| {
                     pyo3::exceptions::PyRuntimeError::new_err("Not connected to coordinator")
                 })?;
@@ -388,7 +389,8 @@ impl TrainingOrchestrator {
 
         py.allow_threads(|| {
             self.runtime.block_on(async move {
-                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> = client_lock.lock().await;
+                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> =
+                    client_lock.lock().await;
                 let grpc_client = guard.as_mut().ok_or_else(|| {
                     pyo3::exceptions::PyRuntimeError::new_err("Not connected to coordinator")
                 })?;
@@ -400,10 +402,7 @@ impl TrainingOrchestrator {
                 };
 
                 let response = grpc_client.get_data_shard(request).await.map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Failed to get shard: {}",
-                        e
-                    ))
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to get shard: {}", e))
                 })?;
 
                 let shard = response.into_inner();
@@ -437,7 +436,8 @@ impl TrainingOrchestrator {
 
         py.allow_threads(|| {
             self.runtime.block_on(async move {
-                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> = client_lock.lock().await;
+                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> =
+                    client_lock.lock().await;
                 let grpc_client = guard.as_mut().ok_or_else(|| {
                     pyo3::exceptions::PyRuntimeError::new_err("Not connected to coordinator")
                 })?;
@@ -471,7 +471,8 @@ impl TrainingOrchestrator {
 
         py.allow_threads(|| {
             self.runtime.block_on(async move {
-                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> = client_lock.lock().await;
+                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> =
+                    client_lock.lock().await;
                 let grpc_client = guard.as_mut().ok_or_else(|| {
                     pyo3::exceptions::PyRuntimeError::new_err("Not connected to coordinator")
                 })?;

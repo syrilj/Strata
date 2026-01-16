@@ -63,11 +63,10 @@ mod tests {
 
         // Register dataset
         manager.register_dataset_params(
-            "cifar10",
-            60_000,  // total samples
-            1_000,   // shard size -> 60 shards
-            true,    // shuffle
-            42,      // seed
+            "cifar10", 60_000, // total samples
+            1_000,  // shard size -> 60 shards
+            true,   // shuffle
+            42,     // seed
         );
 
         // Get epoch 0 assignments

@@ -35,9 +35,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<checkpoint::CheckpointInfo>()?;
     m.add_class::<orchestrator::TrainingOrchestrator>()?;
     m.add_class::<orchestrator::WorkerConfig>()?;
-    
+
     // Add version info
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
-    
+
     Ok(())
 }

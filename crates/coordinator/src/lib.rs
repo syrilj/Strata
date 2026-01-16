@@ -22,8 +22,8 @@
 
 pub mod http_api;
 pub mod middleware;
-pub mod service;
 pub mod server;
+pub mod service;
 
 // Re-export generated protobuf types
 pub mod proto {
@@ -31,9 +31,9 @@ pub mod proto {
 }
 
 // Re-export main types
-pub use service::CoordinatorService;
 pub use server::CoordinatorServer;
+pub use service::CoordinatorService;
 
 // Re-export proto service trait for convenience
-pub use proto::coordinator_server::CoordinatorServer as CoordinatorServiceServer;
 pub use proto::coordinator_client::CoordinatorClient;
+pub use proto::coordinator_server::CoordinatorServer as CoordinatorServiceServer;

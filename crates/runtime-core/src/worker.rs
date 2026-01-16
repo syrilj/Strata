@@ -111,13 +111,7 @@ pub struct WorkerInfo {
 
 impl WorkerInfo {
     /// Create a new worker info
-    pub fn new(
-        id: WorkerId,
-        hostname: String,
-        port: u16,
-        rank: u32,
-        world_size: u32,
-    ) -> Self {
+    pub fn new(id: WorkerId, hostname: String, port: u16, rank: u32, world_size: u32) -> Self {
         let now = Utc::now();
         Self {
             id,
@@ -257,7 +251,13 @@ impl WorkerRegistry {
     }
 
     /// Update worker training progress
-    pub fn update_progress(&self, worker_id: &str, step: u64, epoch: u64, task: Option<String>) -> Result<()> {
+    pub fn update_progress(
+        &self,
+        worker_id: &str,
+        step: u64,
+        epoch: u64,
+        task: Option<String>,
+    ) -> Result<()> {
         let mut worker = self
             .workers
             .get_mut(worker_id)
@@ -372,13 +372,7 @@ mod tests {
     fn test_worker_registration() {
         let registry = WorkerRegistry::new(10, Duration::from_secs(30));
 
-        let worker = WorkerInfo::new(
-            "worker-1".to_string(),
-            "host1".to_string(),
-            50052,
-            0,
-            1,
-        );
+        let worker = WorkerInfo::new("worker-1".to_string(), "host1".to_string(), 50052, 0, 1);
 
         let registered = registry.register(worker).unwrap();
         assert_eq!(registered.rank, 0);
@@ -389,17 +383,15 @@ mod tests {
     fn test_worker_heartbeat() {
         let registry = WorkerRegistry::new(10, Duration::from_secs(30));
 
-        let worker = WorkerInfo::new(
-            "worker-1".to_string(),
-            "host1".to_string(),
-            50052,
-            0,
-            1,
-        );
+        let worker = WorkerInfo::new("worker-1".to_string(), "host1".to_string(), 50052, 0, 1);
         registry.register(worker).unwrap();
 
         registry
-            .heartbeat("worker-1", WorkerState::Training, ResourceMetrics::default())
+            .heartbeat(
+                "worker-1",
+                WorkerState::Training,
+                ResourceMetrics::default(),
+            )
             .unwrap();
 
         let updated = registry.get("worker-1").unwrap();
@@ -410,13 +402,7 @@ mod tests {
     fn test_duplicate_registration() {
         let registry = WorkerRegistry::new(10, Duration::from_secs(30));
 
-        let worker = WorkerInfo::new(
-            "worker-1".to_string(),
-            "host1".to_string(),
-            50052,
-            0,
-            1,
-        );
+        let worker = WorkerInfo::new("worker-1".to_string(), "host1".to_string(), 50052, 0, 1);
 
         registry.register(worker.clone()).unwrap();
         let result = registry.register(worker);
