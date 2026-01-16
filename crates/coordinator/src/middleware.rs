@@ -2,6 +2,9 @@
 //!
 //! Provides rate limiting, input validation, and request logging.
 
+// Allow large Result errors for tonic::Status which is the standard gRPC error type
+#![allow(clippy::result_large_err)]
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
