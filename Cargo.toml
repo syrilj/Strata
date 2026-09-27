@@ -56,6 +56,6 @@ parking_lot = "0.12"
 bytes = "1.7"
 
 # Testing
-criterion = "0.5"
+criterion = "0.8"
 tempfile = "3.10"
 portpicker = "0.1.1"
