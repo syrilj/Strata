@@ -13,8 +13,8 @@
 
 ```bash
 # Clone repository
-git clone https://github.com/user/distributed-training-runtime.git
-cd distributed-training-runtime
+git clone https://github.com/syrilj/Strata.git
+cd Strata
 
 # Build Rust components
 cargo build --release
@@ -51,6 +51,44 @@ cargo bench --bench data_loading
 # Generate HTML report
 cargo bench -- --save-baseline main
 ```
+
+---
+
+## Kubernetes Deployment (`k8s/`)
+
+Fully functional manifests — namespace, ConfigMap, PVC, coordinator (gRPC :50051 + HTTP :51051 + dashboard :3000), 4 worker replicas with HPA (2–10), and Ingress. No mocks: these run the real images built from `Dockerfile` / `Dockerfile.worker`.
+
+```bash
+# 1. Build and push images (replace registry)
+docker build -t <registry>/strata-coordinator:latest .
+docker build -f Dockerfile.worker -t <registry>/strata-worker:latest .
+docker push <registry>/strata-coordinator:latest
+docker push <registry>/strata-worker:latest
+# ...and set `image:` in k8s/coordinator.yaml and k8s/workers.yaml to match.
+
+# 2. Deploy (local backend needs nothing else)
+kubectl apply -k k8s/
+kubectl get pods -n strata
+
+# 3a. S3 backend (production): fill and apply the secret, then flip the flag
+cp k8s/secret.example.yaml k8s/secret.yaml  # fill in values (gitignored)
+kubectl apply -f k8s/secret.yaml
+kubectl -n strata patch configmap strata-config --type merge \
+  -p '{"data":{"STORAGE_BACKEND":"s3"}}'
+kubectl -n strata rollout restart deployment/coordinator
+
+# 3b. Quick access without an ingress controller
+kubectl port-forward -n strata svc/coordinator 3000:3000 51051:51051
+# Dashboard → http://localhost:3000, API → http://localhost:51051/api/health
+```
+
+Notes:
+
+- **Coordinator is 1 replica by design** (not HA yet — see README limitations). The Deployment uses `Recreate` so the checkpoint PVC is never multi-attached.
+- **Ingress** (`k8s/ingress.yaml`, class `nginx`, host `strata.local`) routes `/api` → 51051 and `/` → 3000. Adjust host/class to your cluster.
+- **Workers** scale via `kubectl scale deployment/workers -n strata --replicas=N` or the included HPA (CPU 70%).
+- **Storage:** `STORAGE_BACKEND=local` uses the `checkpoint-data` PVC (20Gi). With `s3`, the PVC can be dropped.
+- Verify with `python scripts/api_load_test.py --base-url http://localhost:51051`.
 
 ---
 
@@ -393,17 +431,16 @@ spec:
 ### Deploy
 
 ```bash
-# Apply configurations
-kubectl apply -f coordinator-deployment.yaml
-kubectl apply -f worker-statefulset.yaml
+# Apply the real manifests in k8s/ (Kustomize; secret.yaml excluded by design)
+kubectl apply -k k8s/
 
 # Check status
-kubectl get pods
-kubectl logs -f coordinator-<pod-id>
-kubectl logs -f worker-0
+kubectl get pods -n strata
+kubectl logs -n strata -l app.kubernetes.io/component=coordinator
+kubectl logs -n strata -l app.kubernetes.io/component=worker
 
-# Scale workers
-kubectl scale statefulset worker --replicas=8
+# Scale workers (or rely on the HPA, min 2 / max 10)
+kubectl scale deployment/workers -n strata --replicas=8
 ```
 
 ---
@@ -479,8 +516,7 @@ eksctl create cluster \
   --nodes-max 10
 
 # Deploy to EKS
-kubectl apply -f coordinator-deployment.yaml
-kubectl apply -f worker-statefulset.yaml
+kubectl apply -k k8s/
 ```
 
 ---

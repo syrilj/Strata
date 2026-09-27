@@ -1,15 +1,17 @@
-# Distributed Training Data & Checkpoint Runtime
+# Strata — Distributed Training Data & Checkpoint Runtime
 
 [![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](https://www.rust-lang.org/)
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
 [![React](https://img.shields.io/badge/react-18.3-blue.svg)](https://react.dev/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/user/distributed-training-runtime)
-[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](https://github.com/user/distributed-training-runtime)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![CI](https://github.com/syrilj/Strata/actions/workflows/ci.yml/badge.svg)](https://github.com/syrilj/Strata/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/syrilj/Strata)](https://github.com/syrilj/Strata/releases)
 
 A high-performance distributed runtime for coordinating data loading, checkpointing, and state persistence across hundreds to thousands of workers for large-scale ML training jobs.
 
-**Built for portfolio demonstration** | [Architecture](docs/ARCHITECTURE.md) | [API Docs](docs/API.md) | [Deployment Guide](docs/DEPLOYMENT.md) | [Interview Guide](docs/INTERVIEW_GUIDE.md)
+**Strata** is the production-grade control plane: Rust + Tokio coordinator, gRPC worker mesh, S3/local checkpointing, Python API, and a real-time React dashboard.
+
+**[Architecture](docs/ARCHITECTURE.md)** | **[API Docs](docs/API.md)** | **[Deployment Guide](docs/DEPLOYMENT.md)** | **[Interview Guide](docs/INTERVIEW_GUIDE.md)** | **[Security](SECURITY.md)** | **[Changelog](CHANGELOG.md)**
 
 ## 🎯 Live Demo
 
@@ -24,8 +26,21 @@ cargo run -p coordinator
 Then open http://localhost:3000 to see the real-time dashboard.
 
 **Dashboard modes:**
-- **Demo Mode** (default): Simulated data, no backend needed
+- **Demo Mode** (`DEMO_MODE=true`): Simulated data, no backend needed
 - **Live Mode**: Real data from coordinator API
+- **No Rust?** Run the mock API + dashboard: `python3 scripts/mock_api.py` then `cd dashboard && npm run dev`
+
+## 📸 Screenshots
+
+| Overview | Tasks |
+|---|---|
+| ![Strata dashboard overview](docs/demo-images/dashboard_overview_1768519762262.png) | ![Strata tasks page](docs/demo-images/tasks_page_1768519812446.png) |
+
+| Datasets | Activity / Logs |
+|---|---|
+| ![Strata datasets page](docs/demo-images/datasets_page_1768519803685.png) | ![Strata activity page](docs/demo-images/activity_page_1768519821851.png) |
+
+More: `docs/demo-images/` (logs, settings). Run `DEMO_MODE=true` locally to reproduce.
 
 ## 🚀 Production Deployment
 
@@ -56,8 +71,9 @@ docker-compose -f docker-compose.prod.yml up -d
 ### 4. Or Deploy to Kubernetes
 
 ```bash
-# See docs/DEPLOYMENT.md for full Kubernetes setup
-kubectl apply -f k8s/
+# Real, apply-ready manifests live in k8s/ (see docs/DEPLOYMENT.md)
+kubectl apply -k k8s/
+kubectl get pods -n strata
 ```
 
 ### Environment Variables
@@ -93,6 +109,36 @@ kubectl apply -f k8s/
 
 ## Architecture
 
+```mermaid
+flowchart TB
+    subgraph PY["Python API (PyO3)"]
+        DR[DatasetRegistry]
+        CM[CheckpointManager]
+        TO[TrainingOrchestrator]
+    end
+    subgraph RS["Rust Core (Tokio)"]
+        GRPC[gRPC Server]
+        CKPT[Checkpoint Manager]
+        SHARD[Data-Shard / Consistent Hash]
+        STORE[Storage S3-Local]
+        MW[Rate Limit + Validation + Metrics]
+    end
+    subgraph OPS["Operations"]
+        W[Workers 100s-1000s]
+        DASH[React Dashboard]
+    end
+    DR --> GRPC
+    CM --> CKPT
+    TO --> GRPC
+    CKPT --> STORE
+    GRPC --- MW
+    GRPC <--> W
+    DASH -->|HTTP /api/dashboard 2s poll| GRPC
+```
+
+<details>
+<summary>Text fallback (no Mermaid renderer)</summary>
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    Python API Layer                          │
@@ -113,6 +159,9 @@ kubectl apply -f k8s/
 │              Worker Nodes (100s - 1000s)                     │
 └─────────────────────────────────────────────────────────────┘
 ```
+</details>
+
+Full diagrams: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Print-ready spec: [SYSTEM_ARCHITECTURE.tex](SYSTEM_ARCHITECTURE.tex).
 
 ## Quick Start
 
@@ -120,8 +169,8 @@ kubectl apply -f k8s/
 
 ```bash
 # Clone the repository
-git clone https://github.com/user/distributed-training-runtime.git
-cd distributed-training-runtime
+git clone https://github.com/syrilj/Strata.git
+cd Strata
 
 # Build Rust components
 cargo build --release
@@ -284,9 +333,20 @@ cargo bench --bench data_loading
 ## Project Structure
 
 ```
-distributed-training-runtime/
+strata/
+├── LICENSE                  # MIT License
+├── SECURITY.md                # Security policy
+├── CODE_OF_CONDUCT.md         # Contributor Covenant
 ├── Cargo.toml                 # Rust workspace configuration
+├── rust-toolchain.toml        # Pinned Rust 1.75 + fmt/clippy
 ├── pyproject.toml             # Python package configuration
+├── k8s/                       # Kubernetes manifests (apply with kubectl apply -k k8s/)
+│   ├── coordinator.yaml       # Coordinator Deployment + Service (50051/51051/3000)
+│   ├── workers.yaml           # Worker Deployment (4 replicas) + HPA
+│   ├── configmap.yaml         # Non-secret config
+│   ├── secret.example.yaml    # S3 creds template (fill → secret.yaml, gitignored)
+│   ├── pvc.yaml               # Checkpoint storage (local backend)
+│   └── ingress.yaml           # strata.local: / → 3000, /api → 51051
 ├── proto/                     # Protocol Buffers definitions
 │   └── coordinator.proto      # gRPC service definitions
 ├── crates/                    # Rust crates
@@ -301,6 +361,8 @@ distributed-training-runtime/
 ├── scripts/                   # Production scripts
 │   ├── simulated_worker.py    # Docker worker simulation
 │   ├── real_worker.py         # Real training worker
+│   ├── mock_api.py            # Mock coordinator API (dashboard dev without Rust)
+│   ├── api_load_test.py       # HTTP API load tester (p50/p99)
 │   ├── setup-aws.sh           # AWS S3 setup
 │   └── start_services.sh      # Service orchestration
 ├── examples/                  # Usage examples
@@ -446,4 +508,4 @@ Contributions welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for:
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT License — Copyright (c) 2026 Syril Jacob. See [LICENSE](LICENSE) for details.

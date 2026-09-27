@@ -1,6 +1,6 @@
-# Contributing to Distributed Training Runtime
+# Contributing to Strata
 
-Thank you for your interest in contributing! This document provides guidelines for contributing to the project.
+Thank you for your interest in contributing! This document provides guidelines for contributing to the project. Please also read our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Code of Conduct
 
@@ -18,8 +18,8 @@ Be respectful and constructive in all interactions.
 
 ```bash
 # Clone repository
-git clone https://github.com/user/distributed-training-runtime.git
-cd distributed-training-runtime
+git clone https://github.com/syrilj/Strata.git
+cd Strata
 
 # Build project
 cargo build

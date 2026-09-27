@@ -1,0 +1,33 @@
+---
+name: Bug report
+description: Report a reproducible bug in Strata
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      placeholder: v0.1.0 / abc1234
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. DEMO_MODE=true cargo run --bin coordinator ...
+        2. Open http://localhost:3000
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (RUST_LOG=debug, browser console)
+      render: shell

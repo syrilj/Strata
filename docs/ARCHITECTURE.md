@@ -1,6 +1,71 @@
 # Architecture
 
-## System Overview
+> Rendered diagrams (Mermaid) first — ASCII fallback preserved below for
+> terminals. Print-ready TikZ spec lives in [`../SYSTEM_ARCHITECTURE.tex`](../SYSTEM_ARCHITECTURE.tex).
+
+## System Overview (Mermaid)
+
+```mermaid
+flowchart TB
+    subgraph Workers["Training Workers (Python)"]
+        TS[Training Script]
+        DR[DatasetRegistry]
+        CK[CheckpointManager]
+        ORCH[TrainingOrchestrator]
+        TS --> DR & CK & ORCH
+    end
+    subgraph Core["Rust Core Runtime"]
+        PYBIND[Python Bindings PyO3]
+        RT[Runtime Core<br/>workers config errors]
+        GRPC[Coordinator gRPC]
+        CKPT[Checkpoint Mgr]
+        SHARD[Data-Shard Mgr]
+        STORE[Storage Backend]
+    end
+    subgraph Infra["Distributed Infrastructure"]
+        NODES[Worker Nodes 100s-1000s]
+        COORD[Coordinator Server]
+        S3[S3 / Local Storage]
+        UI[Strata Dashboard]
+    end
+    DR & ORCH -->|PyO3 FFI| PYBIND
+    CK -->|PyO3 FFI| PYBIND
+    PYBIND --> RT
+    RT --> GRPC & CKPT & SHARD & STORE
+    GRPC <-->|gRPC heartbeat shard barrier checkpoint| NODES
+    CKPT --> S3
+    COORD --- GRPC
+    UI -->|HTTP GET /api/dashboard| COORD
+```
+
+## Request Flows
+
+```mermaid
+sequenceDiagram
+    participant W as Worker
+    participant C as Coordinator gRPC
+    participant S as Storage
+    participant D as Dashboard
+    W->>C: RegisterWorker + Heartbeat 1Hz
+    W->>C: RegisterDataset / GetDataShard
+    C-->>W: ShardAssignment consistent-hash
+    W->>W: Train step
+    W->>S: save_async checkpoint non-blocking
+    W->>C: NotifyCheckpoint metadata
+    C-->>W: GetLatestCheckpoint on recovery
+    D->>C: GET /api/dashboard every 2s
+```
+
+```mermaid
+flowchart LR
+    A[save_async called] --> B[Serialize state sync ~100ms]
+    B --> C[Spawn Tokio background task]
+    C --> D[Write Local atomic rename]
+    C --> E[S3 multipart upload]
+    D & E --> F[Notify coordinator metadata]
+```
+
+## System Overview (ASCII fallback)
 
 The Distributed Training Runtime is a high-performance system designed to coordinate data loading, checkpointing, and state management across hundreds to thousands of worker nodes in large-scale ML training jobs.
 

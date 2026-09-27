@@ -86,5 +86,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - DashMap for lock-free concurrent state management
 - AWS SDK for S3 integration
 
-[Unreleased]: https://github.com/user/distributed-training-runtime/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/user/distributed-training-runtime/releases/tag/v0.1.0
+[Unreleased]: https://github.com/syrilj/Strata/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/syrilj/Strata/releases/tag/v0.1.0

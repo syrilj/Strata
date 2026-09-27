@@ -1,0 +1,16 @@
+# Non-secret coordinator configuration.
+# Apply: kubectl apply -f k8s/
+# S3 credentials live in secret.yaml (see secret.example.yaml) — never commit real creds.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: strata-config
+  namespace: strata
+  labels:
+    app.kubernetes.io/name: strata
+data:
+  RUST_LOG: "info,coordinator=debug"
+  STORAGE_BACKEND: "local" # switch to "s3" + secret.yaml for production S3
+  CHECKPOINT_DIR: "/data/checkpoints"
+  DEMO_MODE: "false" # set "true" for demo data without workers
+  VITE_API_URL: "http://strata-api:51051/api"

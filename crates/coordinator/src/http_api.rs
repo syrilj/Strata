@@ -203,7 +203,7 @@ async fn get_status(State(service): State<AppState>) -> impl IntoResponse {
         connected: true,
         address: "localhost:50051".to_string(),
         uptime: service.uptime_secs(),
-        version: "0.1.0".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
     };
     Json(status)
 }
@@ -271,7 +271,7 @@ async fn get_dashboard_state(State(service): State<AppState>) -> impl IntoRespon
             connected: true,
             address: "localhost:50051".to_string(),
             uptime,
-            version: "0.1.0".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
         },
         workers: service.get_workers_for_api(),
         datasets: service.get_datasets_for_api(),
@@ -605,7 +605,7 @@ fn get_demo_dashboard_state(uptime: u64) -> DashboardState {
             connected: true,
             address: "localhost:50052".to_string(),
             uptime,
-            version: "0.1.0".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
         },
         workers,
         datasets,

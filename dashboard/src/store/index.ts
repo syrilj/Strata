@@ -18,6 +18,9 @@ interface Task {
 interface DashboardState {
   // Connection state
   coordinator: CoordinatorStatus
+  lastError: string | null
+  lastUpdated: number | null
+  retryCount: number
   
   // Data
   workers: Worker[]
@@ -41,6 +44,8 @@ interface DashboardState {
 }
 
 let pollingInterval: ReturnType<typeof setInterval> | null = null
+let backoffMs = 2000
+let visibilityHandlerAttached = false
 
 export const useDashboardStore = create<DashboardState>((set, get) => ({
   // Initial state
@@ -50,6 +55,9 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
     uptime: 0,
     version: '0.1.0',
   },
+  lastError: null,
+  lastUpdated: null,
+  retryCount: 0,
   workers: [],
   datasets: [],
   checkpoints: [],
@@ -176,6 +184,9 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
         metrics,
         tasks,
         logs: systemLogs,
+        lastError: null,
+        lastUpdated: Date.now(),
+        retryCount: 0,
         coordinator: {
           connected: true,
           address: data.coordinator.address,
@@ -183,28 +194,57 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
           version: data.coordinator.version,
         },
       })
+      backoffMs = 2000
     } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to reach coordinator'
       // Log error for debugging but don't spam console in production
       if (import.meta.env.DEV) {
         console.error('Failed to fetch live data:', error)
       }
+      const retryCount = get().retryCount + 1
+      backoffMs = Math.min(backoffMs * 1.5, 15000)
       set((state) => ({
+        retryCount,
+        lastError: message,
         coordinator: { ...state.coordinator, connected: false },
       }))
+      // Re-arm polling with backoff (pause when tab hidden)
+      if (pollingInterval && !document.hidden) {
+        clearInterval(pollingInterval)
+        pollingInterval = setInterval(() => {
+          if (!document.hidden) get().fetchLiveData()
+        }, backoffMs)
+      }
     }
   },
 
   startLiveMode: () => {
     if (pollingInterval) return
+    backoffMs = 2000
     
     get().addLog({ level: 'info', message: 'Connecting to coordinator...', source: 'dashboard' })
     
     // Fetch immediately
     get().fetchLiveData()
+
+    if (!visibilityHandlerAttached) {
+      visibilityHandlerAttached = true
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden && pollingInterval) {
+          clearInterval(pollingInterval)
+          pollingInterval = null
+        } else if (!document.hidden && !pollingInterval) {
+          get().fetchLiveData()
+          pollingInterval = setInterval(() => {
+            if (!document.hidden) get().fetchLiveData()
+          }, backoffMs)
+        }
+      })
+    }
     
     // Then poll every 2 seconds
     pollingInterval = setInterval(() => {
-      get().fetchLiveData()
+      if (!document.hidden) get().fetchLiveData()
     }, 2000)
   },
 

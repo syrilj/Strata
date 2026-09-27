@@ -1,0 +1,32 @@
+# Public entrypoint: dashboard UI at /, coordinator API at /api/.
+# Requires an ingress controller (e.g. ingress-nginx). Replace host with your domain.
+# Local test: kubectl port-forward -n strata svc/coordinator 3000:3000 51051:51051
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: strata
+  namespace: strata
+  labels:
+    app.kubernetes.io/name: strata
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: strata.local
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: coordinator
+                port:
+                  number: 51051
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: coordinator
+                port:
+                  number: 3000

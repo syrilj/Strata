@@ -1,0 +1,22 @@
+---
+name: Feature request
+description: Propose an enhancement for Strata
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / use case
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [coordinator, checkpoint, data-shard, storage, python-bindings, dashboard, docs, ci]
