@@ -1,4 +1,4 @@
-import { Database, FileText, TrendingUp, Activity } from 'lucide-react';
+import { Database, FileText, Layers, Server } from 'lucide-react';
 import { cn } from '../lib/utils';
 
 interface DataSample {
@@ -14,46 +14,6 @@ interface DataPreviewProps {
   samples?: DataSample[];
   isLoading?: boolean;
 }
-
-// Generate placeholder image with label using CSS gradient
-const getPlaceholderStyle = (label: string, seed: number) => {
-  // Create a deterministic color based on label
-  const hash = label.split('').reduce((acc, char) => acc + char.charCodeAt(0), seed);
-  const hue = hash % 360;
-  const saturation = 60 + (hash % 30);
-  const lightness = 45 + (hash % 15);
-  
-  return {
-    background: `linear-gradient(135deg, hsl(${hue}, ${saturation}%, ${lightness}%) 0%, hsl(${(hue + 40) % 360}, ${saturation}%, ${lightness - 10}%) 100%)`,
-  };
-};
-
-// Get emoji for label
-const getEmojiForLabel = (label: string): string => {
-  const emojiMap: Record<string, string> = {
-    'tench': '🐟',
-    'goldfish': '🐠',
-    'shark': '🦈',
-    'ray': '🐡',
-    'stingray': '🐡',
-    'rooster': '🐓',
-    'hen': '🐔',
-    'ostrich': '🦤',
-    'bird': '🐦',
-    'brambling': '🐦',
-    'goldfinch': '🐦',
-    'finch': '🐦',
-    'junco': '🐦',
-    'bunting': '🐦',
-  };
-  
-  for (const [key, emoji] of Object.entries(emojiMap)) {
-    if (label.toLowerCase().includes(key)) {
-      return emoji;
-    }
-  }
-  return '🖼️';
-};
 
 // Generate placeholder sample visualizations for demonstration
 // Note: The coordinator stores dataset metadata (size, shards, format) but not actual samples.
@@ -73,7 +33,7 @@ const generateMockSamples = (datasetId: string): DataSample[] => {
           ma_30: 175.89,
           rsi: 62.4,
         },
-        label: 181.20, // Next day close price
+        label: 181.20,
         shard_id: 0,
         worker_id: 'gpu-node-1',
       },
@@ -112,7 +72,6 @@ const generateMockSamples = (datasetId: string): DataSample[] => {
     ];
   }
 
-  // ImageNet-style data with more samples
   const imageLabels = [
     'tench (fish)',
     'goldfish',
@@ -123,15 +82,9 @@ const generateMockSamples = (datasetId: string): DataSample[] => {
     'stingray',
     'rooster',
     'hen',
-    'ostrich',
-    'brambling',
-    'goldfinch',
-    'house finch',
-    'junco',
-    'indigo bunting',
   ];
 
-  return imageLabels.slice(0, 9).map((label, idx) => ({
+  return imageLabels.map((label, idx) => ({
     id: `img_${String(idx + 1).padStart(4, '0')}`,
     features: {
       image_path: `/data/imagenet/train/n0144${String(idx).padStart(4, '0')}/image_${idx}.JPEG`,
@@ -139,8 +92,6 @@ const generateMockSamples = (datasetId: string): DataSample[] => {
       height: 224,
       channels: 3,
       mean_rgb: [0.485 + Math.random() * 0.1, 0.456 + Math.random() * 0.1, 0.406 + Math.random() * 0.1],
-      placeholderStyle: getPlaceholderStyle(label, idx),
-      emoji: getEmojiForLabel(label),
     },
     label,
     shard_id: Math.floor(idx / 3),
@@ -149,143 +100,137 @@ const generateMockSamples = (datasetId: string): DataSample[] => {
 };
 
 export function DataPreview({ datasetId, samples, isLoading = false }: DataPreviewProps) {
-  // Use provided samples if available, otherwise generate placeholders for visualization
   const displaySamples = samples || generateMockSamples(datasetId);
   const isStockData = datasetId.includes('stock') || datasetId.includes('AAPL');
 
   if (isLoading) {
     return (
       <div className="card p-6">
-        <div className="flex items-center gap-2 mb-4">
-          <Database className="h-5 w-5 text-zinc-400" />
-          <h2 className="text-sm font-medium text-white">Data Preview</h2>
-        </div>
-        <div className="flex items-center justify-center h-32 text-zinc-500">
-          Loading data samples...
+        <p className="eyebrow mb-1">Samples</p>
+        <h2 className="h-display text-[15px]">Data preview</h2>
+        <div className="mt-4 space-y-2" aria-label="Loading">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="skeleton h-10 w-full" />
+          ))}
         </div>
       </div>
     );
   }
 
   return (
-    <div className="card p-6">
-      <div className="flex items-center gap-2 mb-2">
-        <Database className="h-5 w-5 text-zinc-400" />
-        <h2 className="text-sm font-medium text-white">Data Preview - {datasetId}</h2>
+    <div className="card overflow-hidden">
+      <div className="px-6 pt-6 pb-4">
+        <div className="flex items-baseline justify-between gap-3">
+          <div className="min-w-0">
+            <p className="eyebrow mb-1">Samples</p>
+            <h2 className="h-display text-[15px] truncate font-mono">Data preview — {datasetId}</h2>
+          </div>
+          <span className="text-[11px] text-zinc-500 tabular shrink-0">{displaySamples.length} rows</span>
+        </div>
+        <p className="text-[13px] text-zinc-500 mt-1.5 leading-relaxed">
+          {isStockData
+            ? 'Stock price samples with technical indicators'
+            : 'Image samples being processed by workers'}
+        </p>
       </div>
-      <p className="text-xs text-zinc-500 mb-4">
-        {isStockData 
-          ? `Showing ${displaySamples.length} stock price samples with technical indicators`
-          : `Showing ${displaySamples.length} image samples being processed by workers`
-        }
-      </p>
 
-      <div className="space-y-4">
-        {/* Data Statistics */}
-        <div className="grid grid-cols-3 gap-4">
-          <div className="flex items-center gap-2 p-3 bg-zinc-800/30 rounded-lg">
-            <FileText className="h-4 w-4 text-blue-400" />
-            <div>
-              <div className="text-xs text-zinc-500">Samples</div>
-              <div className="text-lg font-semibold text-zinc-200">{displaySamples.length}</div>
-            </div>
-          </div>
-          <div className="flex items-center gap-2 p-3 bg-zinc-800/30 rounded-lg">
-            <TrendingUp className="h-4 w-4 text-green-400" />
-            <div>
-              <div className="text-xs text-zinc-500">Shards</div>
-              <div className="text-lg font-semibold text-zinc-200">
-                {new Set(displaySamples.map((s) => s.shard_id)).size}
+      <div className="px-6 pb-6 space-y-4">
+        <div className="grid grid-cols-3 gap-2.5">
+          {[
+            { icon: FileText, label: 'Samples', value: displaySamples.length },
+            { icon: Layers, label: 'Shards', value: new Set(displaySamples.map((s) => s.shard_id)).size },
+            { icon: Server, label: 'Workers', value: new Set(displaySamples.map((s) => s.worker_id).filter(Boolean)).size },
+          ].map(({ icon: Icon, label, value }) => (
+            <div key={label} className="flex items-center gap-2.5 px-3 py-2.5 rounded-lg bg-white/[0.02] border border-white/[0.06]">
+              <Icon className="h-4 w-4 text-zinc-400 shrink-0" aria-hidden="true" />
+              <div className="min-w-0">
+                <p className="text-[11px] text-zinc-500 font-medium">{label}</p>
+                <p className="text-[15px] font-semibold text-zinc-100 tabular leading-tight">{value}</p>
               </div>
             </div>
-          </div>
-          <div className="flex items-center gap-2 p-3 bg-zinc-800/30 rounded-lg">
-            <Activity className="h-4 w-4 text-purple-400" />
-            <div>
-              <div className="text-xs text-zinc-500">Workers</div>
-              <div className="text-lg font-semibold text-zinc-200">
-                {new Set(displaySamples.map((s) => s.worker_id).filter(Boolean)).size}
-              </div>
-            </div>
-          </div>
+          ))}
         </div>
 
-        {/* Sample Data - Always use table view */}
-        <div className="border border-zinc-800 rounded-lg overflow-hidden">
+        <div className="border border-white/[0.07] rounded-[10px] overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="bg-zinc-800/50">
+              <thead className="bg-white/[0.02] border-b border-white/[0.07]">
                 <tr>
-                  <th className="px-3 py-2 text-left text-xs font-medium text-zinc-400">Sample ID</th>
+                  <th className="table-head">Sample ID</th>
                   {isStockData ? (
                     <>
-                      <th className="px-3 py-2 text-left text-xs font-medium text-zinc-400">Open</th>
-                      <th className="px-3 py-2 text-left text-xs font-medium text-zinc-400">High</th>
-                      <th className="px-3 py-2 text-left text-xs font-medium text-zinc-400">Low</th>
-                      <th className="px-3 py-2 text-left text-xs font-medium text-zinc-400">Close</th>
-                      <th className="px-3 py-2 text-left text-xs font-medium text-zinc-400">Volume</th>
-                      <th className="px-3 py-2 text-left text-xs font-medium text-zinc-400">RSI</th>
-                      <th className="px-3 py-2 text-left text-xs font-medium text-zinc-400">Target</th>
+                      <th className="table-head">Open</th>
+                      <th className="table-head">High</th>
+                      <th className="table-head">Low</th>
+                      <th className="table-head">Close</th>
+                      <th className="table-head">Volume</th>
+                      <th className="table-head">RSI</th>
+                      <th className="table-head">Target</th>
                     </>
                   ) : (
                     <>
-                      <th className="px-3 py-2 text-left text-xs font-medium text-zinc-400">Label</th>
-                      <th className="px-3 py-2 text-left text-xs font-medium text-zinc-400">Dimensions</th>
-                      <th className="px-3 py-2 text-left text-xs font-medium text-zinc-400">Path</th>
+                      <th className="table-head">Label</th>
+                      <th className="table-head">Dimensions</th>
+                      <th className="table-head">Path</th>
                     </>
                   )}
-                  <th className="px-3 py-2 text-left text-xs font-medium text-zinc-400">Shard</th>
-                  <th className="px-3 py-2 text-left text-xs font-medium text-zinc-400">Worker</th>
+                  <th className="table-head">Shard</th>
+                  <th className="table-head">Worker</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-zinc-800">
+              <tbody className="divide-y divide-white/[0.06]">
                 {displaySamples.map((sample) => (
-                  <tr key={sample.id} className="hover:bg-zinc-800/30">
-                    <td className="px-3 py-2 font-mono text-xs text-zinc-400">{sample.id}</td>
+                  <tr key={sample.id} className="hover:bg-white/[0.02] transition-colors duration-[150ms]">
+                    <td className="px-3 py-2.5 font-mono text-[12px] text-zinc-400 whitespace-nowrap">
+                      <span className="inline-flex items-center gap-1.5">
+                        <Database className="w-3 h-3 text-zinc-600" aria-hidden="true" />
+                        {sample.id}
+                      </span>
+                    </td>
                     {isStockData ? (
                       <>
-                        <td className="px-3 py-2 text-zinc-300">${sample.features.open.toFixed(2)}</td>
-                        <td className="px-3 py-2 text-zinc-300">${sample.features.high.toFixed(2)}</td>
-                        <td className="px-3 py-2 text-zinc-300">${sample.features.low.toFixed(2)}</td>
-                        <td className="px-3 py-2 font-semibold text-zinc-200">
+                        <td className="px-3 py-2.5 text-zinc-300 tabular whitespace-nowrap">${sample.features.open.toFixed(2)}</td>
+                        <td className="px-3 py-2.5 text-zinc-300 tabular whitespace-nowrap">${sample.features.high.toFixed(2)}</td>
+                        <td className="px-3 py-2.5 text-zinc-300 tabular whitespace-nowrap">${sample.features.low.toFixed(2)}</td>
+                        <td className="px-3 py-2.5 font-semibold text-zinc-100 tabular whitespace-nowrap">
                           ${sample.features.close.toFixed(2)}
                         </td>
-                        <td className="px-3 py-2 text-xs text-zinc-400">
+                        <td className="px-3 py-2.5 text-[12px] text-zinc-400 tabular whitespace-nowrap">
                           {(sample.features.volume / 1_000_000).toFixed(1)}M
                         </td>
-                        <td className="px-3 py-2">
+                        <td className="px-3 py-2.5 whitespace-nowrap">
                           <span
                             className={cn(
-                              'px-2 py-0.5 rounded text-xs',
+                              'px-1.5 py-0.5 rounded-md text-[11.5px] font-semibold tabular border',
                               sample.features.rsi > 70
-                                ? 'bg-red-500/20 text-red-400'
-                                : 'bg-blue-500/20 text-blue-400'
+                                ? 'bg-amber-500/[0.08] text-amber-200 border-amber-500/20'
+                                : 'bg-white/[0.04] text-zinc-300 border-white/10'
                             )}
                           >
                             {sample.features.rsi.toFixed(1)}
                           </span>
                         </td>
-                        <td className="px-3 py-2 font-semibold text-green-400">
+                        <td className="px-3 py-2.5 font-semibold text-emerald-300 tabular whitespace-nowrap">
                           ${sample.label.toFixed(2)}
                         </td>
                       </>
                     ) : (
                       <>
-                        <td className="px-3 py-2 text-zinc-300">{sample.label}</td>
-                        <td className="px-3 py-2 text-zinc-400">
+                        <td className="px-3 py-2.5 text-zinc-200 text-[13px] max-w-[180px] truncate">{sample.label}</td>
+                        <td className="px-3 py-2.5 text-zinc-400 tabular text-[12.5px] whitespace-nowrap">
                           {sample.features.width}×{sample.features.height}×{sample.features.channels}
                         </td>
-                        <td className="px-3 py-2 font-mono text-xs text-zinc-500 max-w-xs truncate">
+                        <td className="px-3 py-2.5 font-mono text-[11.5px] text-zinc-500 max-w-[220px] truncate">
                           {sample.features.image_path}
                         </td>
                       </>
                     )}
-                    <td className="px-3 py-2">
-                      <span className="px-2 py-0.5 rounded bg-zinc-700/50 text-zinc-300 text-xs">
-                        Shard {sample.shard_id}
+                    <td className="px-3 py-2.5 whitespace-nowrap">
+                      <span className="px-1.5 py-0.5 rounded-md bg-white/[0.04] border border-white/[0.07] text-zinc-300 text-[11.5px] font-mono tabular">
+                        S{sample.shard_id}
                       </span>
                     </td>
-                    <td className="px-3 py-2 text-xs text-zinc-500">{sample.worker_id || 'N/A'}</td>
+                    <td className="px-3 py-2.5 text-[12px] text-zinc-500 font-mono whitespace-nowrap">{sample.worker_id || '—'}</td>
                   </tr>
                 ))}
               </tbody>
@@ -293,13 +238,11 @@ export function DataPreview({ datasetId, samples, isLoading = false }: DataPrevi
           </div>
         </div>
 
-        {/* Feature Distribution Info */}
-        <div className="text-xs text-zinc-400 p-3 bg-zinc-800/30 rounded-lg">
-          <strong className="text-zinc-300">💡 About this data:</strong> This shows {isStockData ? 'stock price' : 'image'} samples being processed in real-time.
-          Each worker receives different shards of the dataset for distributed training.
+        <div className="text-[12.5px] text-zinc-500 px-4 py-3.5 bg-white/[0.02] border border-white/[0.06] rounded-[10px] leading-relaxed">
+          <span className="text-zinc-200 font-semibold">About this data — </span>
           {isStockData
-            ? ' Stock features include OHLC prices, volume, and technical indicators (MA, RSI) for next-day price prediction.'
-            : ' Images are preprocessed to 224×224 pixels with normalized RGB channels for classification tasks.'}
+            ? 'OHLC prices, volume, and technical indicators (MA, RSI) for next-day price prediction. Each worker receives a different shard.'
+            : 'Images are preprocessed to 224×224 with normalized RGB channels. Each worker receives a different shard.'}
         </div>
       </div>
     </div>

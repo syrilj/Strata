@@ -1,62 +1,59 @@
-import { HardDrive, RadioTower, Users, Timer } from 'lucide-react'
 import { useDashboardStore } from '../store'
 
-interface MetricCardProps {
-  icon: React.ReactNode
-  label: string
-  value: string | number
-  unit?: string
-  sublabel?: string
-}
-
-function MetricCard({ icon, label, value, unit, sublabel }: MetricCardProps) {
+function Stat({ label, value, unit, sub, first = false }: { label: string; value: string; unit?: string; sub: string; first?: boolean }) {
   return (
-    <div className="card p-5">
-      <div className="flex items-center gap-2 mb-3">
-        {icon}
-        <span className="text-xs text-zinc-500 uppercase tracking-wide">{label}</span>
-      </div>
-      <p className="text-2xl font-semibold text-white">
+    <div className={`px-5 sm:px-6 py-5 min-w-0 ${first ? '' : 'border-l border-white/[0.07]'}`}>
+      <p className="eyebrow">{label}</p>
+      <p className="mt-2 text-[26px] leading-none font-semibold text-white tracking-[-0.02em] tabular">
         {value}
-        {unit && <span className="text-sm text-zinc-500 font-normal ml-1">{unit}</span>}
+        {unit && <span className="text-[13px] text-zinc-500 font-medium ml-1.5 tracking-normal">{unit}</span>}
       </p>
-      {sublabel && <p className="text-xs text-zinc-600 mt-1">{sublabel}</p>}
+      <p className="text-[12px] text-zinc-500 mt-1.5">{sub}</p>
     </div>
   )
 }
 
 export function MetricsCards() {
   const { metrics } = useDashboardStore()
-  
+
   return (
-    <div className="grid grid-cols-4 gap-4 mb-6" role="region" aria-label="System metrics">
-      <MetricCard
-        icon={<HardDrive className="w-4 h-4 text-zinc-500" aria-hidden="true" />}
-        label="Checkpoint Throughput"
-        value={metrics.checkpointThroughput}
-        unit="MB/s"
-        sublabel="Local NVMe"
-      />
-      <MetricCard
-        icon={<RadioTower className="w-4 h-4 text-zinc-500" aria-hidden="true" />}
-        label="Coordinator"
-        value={`${(metrics.coordinatorRps / 1000).toFixed(1)}K+`}
-        unit="req/s"
-        sublabel="gRPC capacity"
-      />
-      <MetricCard
-        icon={<Users className="w-4 h-4 text-zinc-500" aria-hidden="true" />}
-        label="Workers"
-        value={`${metrics.activeWorkers}/${metrics.totalWorkers}`}
-        sublabel="Active / Total"
-      />
-      <MetricCard
-        icon={<Timer className="w-4 h-4 text-zinc-500" aria-hidden="true" />}
-        label="Barrier Sync"
-        value={`<${metrics.barrierLatencyP99}`}
-        unit="ms"
-        sublabel="p99 latency"
-      />
-    </div>
+    <section
+      className="card mb-8 grid grid-cols-2 xl:grid-cols-4 divide-y sm:divide-y-0 overflow-hidden"
+      role="region"
+      aria-label="System metrics"
+    >
+      <div className="col-span-2 xl:col-span-1 border-b sm:border-b xl:border-b-0 border-white/[0.07]">
+        <Stat
+          first
+          label="Checkpoint throughput"
+          value={String(metrics.checkpointThroughput)}
+          unit="MB/s"
+          sub="Local NVMe · live"
+        />
+      </div>
+      <div className="border-b sm:border-b xl:border-b-0 border-white/[0.07]">
+        <Stat
+          label="Coordinator"
+          value={`${(metrics.coordinatorRps / 1000).toFixed(1)}K`}
+          unit="req/s"
+          sub="gRPC capacity"
+        />
+      </div>
+      <div className="border-b sm:border-b xl:border-b-0 border-white/[0.07]">
+        <Stat
+          label="Workers"
+          value={`${metrics.activeWorkers}/${metrics.totalWorkers}`}
+          sub="Active / total"
+        />
+      </div>
+      <div className="col-span-2 xl:col-span-1">
+        <Stat
+          label="Barrier sync p99"
+          value={`<${metrics.barrierLatencyP99}`}
+          unit="ms"
+          sub="Sync latency"
+        />
+      </div>
+    </section>
   )
 }
