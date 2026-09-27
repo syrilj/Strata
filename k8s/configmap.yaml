@@ -12,5 +12,5 @@ data:
   RUST_LOG: "info,coordinator=debug"
   STORAGE_BACKEND: "local" # switch to "s3" + secret.yaml for production S3
   CHECKPOINT_DIR: "/data/checkpoints"
-  DEMO_MODE: "false" # set "true" for demo data without workers
+  DEMO_MODE: "false" # "true" serves the seeded development dataset
   VITE_API_URL: "http://strata-api:51051/api"

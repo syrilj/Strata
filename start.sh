@@ -1,10 +1,10 @@
 #!/bin/bash
-# Quick start script for demo mode
+# Quick start script for a local Strata cluster
 
-echo "🚀 Starting Distributed Training Runtime Demo"
+echo "🚀 Starting Strata"
 echo ""
 echo "This will start:"
-echo "  1. Coordinator with demo data (port 50051 gRPC, 51051 HTTP)"
+echo "  1. Coordinator with seeded data (port 50051 gRPC, 51051 HTTP)"
 echo "  2. Dashboard (port 3000)"
 echo ""
 echo "Press Ctrl+C to stop all services"
@@ -20,7 +20,7 @@ cleanup() {
 
 trap cleanup INT TERM
 
-# Start coordinator in demo mode
+# Start coordinator (seeded development dataset)
 echo "📡 Starting coordinator..."
 DEMO_MODE=true cargo run --release --bin coordinator -- 0.0.0.0:50051 > /tmp/coordinator.log 2>&1 &
 COORDINATOR_PID=$!
@@ -57,8 +57,8 @@ echo "  API:          http://localhost:51051/api/health"
 echo "  Coordinator:  localhost:50051 (gRPC)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "📊 Demo includes:"
-echo "  • 3 simulated workers (2 GPU, 1 CPU)"
+echo "📊 Seeded cluster includes:"
+echo "  • 3 workers (2 GPU, 1 CPU)"
 echo "  • Active training task with progress"
 echo "  • Real-time metrics and logs"
 echo "  • Sample training data preview"

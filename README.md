@@ -13,7 +13,7 @@ A high-performance distributed runtime for coordinating data loading, checkpoint
 
 **[Architecture](docs/ARCHITECTURE.md)** | **[API Docs](docs/API.md)** | **[Deployment Guide](docs/DEPLOYMENT.md)** | **[Interview Guide](docs/INTERVIEW_GUIDE.md)** | **[Security](SECURITY.md)** | **[Changelog](CHANGELOG.md)**
 
-## 🎯 Live Demo
+## 🚀 Getting Started
 
 ```bash
 # Quick start with Docker - runs coordinator + 4 simulated workers
@@ -25,10 +25,9 @@ cargo run -p coordinator
 
 Then open http://localhost:3000 to see the real-time dashboard.
 
-**Dashboard modes:**
-- **Demo Mode** (`DEMO_MODE=true`): Simulated data, no backend needed
-- **Live Mode**: Real data from coordinator API
-- **No Rust?** Run the mock API + dashboard: `python3 scripts/mock_api.py` then `cd dashboard && npm run dev`
+**Run modes:**
+- **Seeded data** (`DEMO_MODE=true`): starts the real coordinator with a seeded development dataset — no cluster needed
+- **Live cluster**: real data from coordinator + workers
 
 ## 📸 Screenshots
 
@@ -40,7 +39,7 @@ Then open http://localhost:3000 to see the real-time dashboard.
 |---|---|
 | ![Strata datasets page](docs/demo-images/datasets_page_1768519803685.png) | ![Strata activity page](docs/demo-images/activity_page_1768519821851.png) |
 
-More: `docs/demo-images/` (logs, settings). Run `DEMO_MODE=true` locally to reproduce.
+More: `docs/demo-images/` (logs, settings). Screenshots captured from a live local cluster.
 
 ## 🚀 Production Deployment
 
@@ -161,7 +160,7 @@ flowchart TB
 ```
 </details>
 
-Full diagrams: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Print-ready spec: [SYSTEM_ARCHITECTURE.tex](SYSTEM_ARCHITECTURE.tex).
+Full diagrams: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Print-ready spec: [docs/SYSTEM_ARCHITECTURE.tex](docs/SYSTEM_ARCHITECTURE.tex).
 
 ## Quick Start
 
@@ -361,7 +360,6 @@ strata/
 ├── scripts/                   # Production scripts
 │   ├── simulated_worker.py    # Docker worker simulation
 │   ├── real_worker.py         # Real training worker
-│   ├── mock_api.py            # Mock coordinator API (dashboard dev without Rust)
 │   ├── api_load_test.py       # HTTP API load tester (p50/p99)
 │   ├── setup-aws.sh           # AWS S3 setup
 │   └── start_services.sh      # Service orchestration
@@ -371,8 +369,8 @@ strata/
 ├── tests/                     # All tests
 │   ├── rust/                  # Rust integration tests
 │   ├── python/                # Python test suite
-│   └── demos/                 # Demo scripts
-│       ├── demo.py            # Simulated training demo
+│   └── demos/                 # Seeded training scenarios
+│       ├── demo.py            # Seeded multi-worker training run
 │       ├── test_training.py   # Multi-worker test
 │       └── distributed_task.py # Distributed decryption demo
 ├── dashboard/                 # React monitoring UI

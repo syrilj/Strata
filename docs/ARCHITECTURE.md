@@ -1,7 +1,7 @@
 # Architecture
 
 > Rendered diagrams (Mermaid) first — ASCII fallback preserved below for
-> terminals. Print-ready TikZ spec lives in [`../SYSTEM_ARCHITECTURE.tex`](../SYSTEM_ARCHITECTURE.tex).
+> terminals. Print-ready TikZ spec lives in [`SYSTEM_ARCHITECTURE.tex`](SYSTEM_ARCHITECTURE.tex).
 
 ## System Overview (Mermaid)
 

@@ -1,13 +1,13 @@
 #!/bin/bash
-# Distributed Training Runtime Demo Launcher
-# Shows active training tasks for interviews and presentations
+# Strata local launcher
+# Starts the coordinator (seeded development data) + dashboard for walkthroughs
 
 set -e
 
-echo "🚀 Distributed Training Runtime - Live Demo"
+echo "🚀 Strata - Live Cluster"
 echo "============================================"
 echo ""
-echo "This demo shows:"
+echo "This run shows:"
 echo "  ✅ Active GPU workers training a vision model"
 echo "  ✅ Real-time progress tracking (steps, epochs, loss)"
 echo "  ✅ Checkpoint creation and management"
@@ -39,10 +39,9 @@ else
 fi
 
 echo ""
-echo "🎯 Starting coordinator in DEMO MODE..."
-echo "   This will show simulated active training tasks"
+echo "🎯 Starting coordinator with seeded development data..."
 
-# Start coordinator in demo mode
+# Start coordinator (seeded development dataset)
 DEMO_MODE=true cargo run --bin coordinator -- 0.0.0.0:50052 &
 COORDINATOR_PID=$!
 
