@@ -34,7 +34,7 @@ tonic = "0.12"
 prost = "0.13"
 
 # Python bindings
-pyo3 = { version = "0.22", features = ["extension-module"] }
+pyo3 = { version = "0.29", features = ["extension-module"] }
 pyo3-async-runtimes = { version = "0.22", features = ["tokio-runtime"] }
 
 # Storage
