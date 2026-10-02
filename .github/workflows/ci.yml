@@ -89,7 +89,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
       - name: Validate compose config
         run: docker compose -f docker-compose.yml config >/dev/null
       - name: Build coordinator image (no push)
