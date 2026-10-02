@@ -176,7 +176,7 @@ impl CheckpointManager {
             })
         })?;
 
-        Ok(PyBytes::new_bound(py, &data).into())
+        Ok(PyBytes::new(py, &data).into())
     }
 
     /// Get the latest checkpoint info

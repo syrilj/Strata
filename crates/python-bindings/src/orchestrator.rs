@@ -205,6 +205,7 @@ impl TrainingOrchestrator {
     ///
     /// Returns:
     ///     WorkerConfig with assigned rank and world size
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (worker_id, hostname, port, gpu_count=0, memory_bytes=0, metadata=None))]
     fn register_worker(
         &self,
@@ -319,6 +320,7 @@ impl TrainingOrchestrator {
     ///     shard_size: Samples per shard
     ///     shuffle: Whether to shuffle (default: True)
     ///     seed: Random seed (default: 42)
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (dataset_id, path, total_samples, shard_size, shuffle=true, seed=42))]
     fn register_dataset(
         &self,

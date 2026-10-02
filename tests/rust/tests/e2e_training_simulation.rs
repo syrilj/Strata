@@ -7,6 +7,8 @@
 //! - Worker failure and recovery
 //! - Barrier synchronization
 
+#![allow(dead_code)]
+
 use anyhow::Result;
 use coordinator::proto::{
     worker_status::State, BarrierRequest, CheckpointInfo, CheckpointType, DatasetInfo,
