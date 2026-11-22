@@ -19,7 +19,7 @@ fnv = "1.0"
 
 # Random number generation for shuffling
 rand = "0.8"
-rand_chacha = "0.3"
+rand_chacha = "0.10"
 
 [dev-dependencies]
 criterion = { workspace = true }
