@@ -16,12 +16,11 @@ use coordinator::CoordinatorClient;
 use coordinator::CoordinatorService;
 use coordinator::CoordinatorServiceServer;
 use std::collections::HashSet;
-use std::net::SocketAddr;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Barrier;
 use tokio::time::sleep;
+use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 
 async fn start_coordinator() -> Result<(String, tokio::sync::oneshot::Sender<()>)> {
@@ -29,8 +28,9 @@ async fn start_coordinator() -> Result<(String, tokio::sync::oneshot::Sender<()>
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    let port = portpicker::pick_unused_port().expect("No ports free");
-    let addr = SocketAddr::from_str(&format!("127.0.0.1:{}", port))?;
+    // Bind to an OS-assigned port (IPv4 loopback only, so this works without IPv6).
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
 
     let (tx, rx) = tokio::sync::oneshot::channel();
 
@@ -38,7 +38,7 @@ async fn start_coordinator() -> Result<(String, tokio::sync::oneshot::Sender<()>
 
     let server = Server::builder()
         .add_service(svc)
-        .serve_with_shutdown(addr, async {
+        .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
             rx.await.ok();
         });
 

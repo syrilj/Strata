@@ -56,4 +56,3 @@ bytes = "1.7"
 # Testing
 criterion = "0.5"
 tempfile = "3.10"
-portpicker = "0.1.1"
