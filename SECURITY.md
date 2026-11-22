@@ -36,7 +36,7 @@ Out of scope (current limitations, see README):
 
 - Single coordinator is not HA — DoS resilience is best-effort
 - No built-in auth/authz — deploy behind mTLS / VPN / API gateway in production
-- Local backend has no encryption at rest — use S3 SSE-KMS for sensitive checkpoints
+- Checkpoints are stored unencrypted on local disk — use an encrypted volume for sensitive checkpoints (S3 storage is not wired in yet)
 
 ## Production Hardening Checklist
 
