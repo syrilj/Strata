@@ -93,7 +93,7 @@ jobs:
       - name: Validate compose config
         run: docker compose -f docker-compose.yml config >/dev/null
       - name: Build coordinator image (no push)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
