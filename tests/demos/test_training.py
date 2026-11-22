@@ -10,9 +10,14 @@ import random
 import threading
 import grpc
 
-# Import generated protobuf
-import coordinator_pb2
-import coordinator_pb2_grpc
+import os
+
+try:
+    from dtruntime import coordinator_pb2, coordinator_pb2_grpc
+except ImportError:
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "python", "dtruntime"))
+    import coordinator_pb2
+    import coordinator_pb2_grpc
 
 
 def run_worker(worker_id: str, gpu_count: int, coordinator_url: str = "localhost:50051"):

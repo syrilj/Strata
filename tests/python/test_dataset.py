@@ -1,26 +1,58 @@
-import pytest
 from dtruntime import DatasetRegistry
 
-def test_register_dataset(coordinator_server, temp_dataset_dir):
-    registry = DatasetRegistry(coordinator_server)
-    registry.register("test-dataset-py", temp_dataset_dir, "parquet")
 
-def test_get_shard(coordinator_server, temp_dataset_dir):
+def test_local_dataset_registry(temp_dataset_dir):
+    registry = DatasetRegistry()
+    registry.register_worker("worker-0")
+    registry.register_worker("worker-1")
+
+    registry.register(
+        "local-ds",
+        temp_dataset_dir,
+        format="parquet",
+        total_samples=1000,
+        shard_size=100,
+        shuffle=True,
+        seed=42,
+    )
+
+    shards = registry.get_shards("local-ds", "worker-0", epoch=0)
+    assert len(shards) > 0
+    assert shards[0].dataset_id == "local-ds"
+    assert shards[0].num_samples > 0
+
+    shard = registry.get_shard("local-ds", worker_id="worker-1", epoch=0)
+    assert shard.dataset_id == "local-ds"
+    assert shard.end_index > shard.start_index
+
+
+def test_register_dataset_coordinator(coordinator_server, temp_dataset_dir):
     registry = DatasetRegistry(coordinator_server)
-    registry.register("test-dataset-py-2", temp_dataset_dir, "parquet")
-    
-    # We need a registered worker for get_shard to work?
-    # DatasetRegistry interacts with coordinator. The coordinator requires "worker_id" to assign shards.
-    # The `get_shard` method in Python binding takes (dataset_name, worker_id, epoch).
-    # But for it to return a shard, the dataset must be registered.
-    # Does the worker need to be registered first? 
-    # Logic in coordinator: get_data_shard doesn't explicitly check if worker is registered for *shard assignment* 
-    # but strictly speaking usually it should.
-    # Let's assume it works without explicit worker registration if the logic permits, 
-    # or we might need to register a worker via gRPC client or via Python if exposed.
-    # Currently Python bindings don't expose Worker registration (it's in `TrainingOrchestrator` implicitly?).
-    # `TrainingOrchestrator` calls `register_worker`.
-    
-    shard = registry.get_shard("test-dataset-py-2", worker_rank=0, epoch=0)
-    assert shard is not None
-    assert len(shard) > 0 # Should have file paths
+    registry.register(
+        "test-dataset-py",
+        temp_dataset_dir,
+        format="parquet",
+        total_samples=5000,
+        shard_size=500,
+    )
+
+
+def test_get_shard_coordinator(coordinator_server, temp_dataset_dir):
+    registry = DatasetRegistry(coordinator_server)
+    registry.register(
+        "test-dataset-py-2",
+        temp_dataset_dir,
+        format="parquet",
+        total_samples=5000,
+        shard_size=500,
+    )
+
+    try:
+        shard = registry.get_shard("test-dataset-py-2", worker_rank=0, epoch=0)
+        assert shard is not None
+        assert shard.dataset_id == "test-dataset-py-2"
+        assert shard.total_shards == 10
+        assert shard.end_index > shard.start_index
+        assert len(shard.file_paths) > 0
+    finally:
+        registry.remove_worker("worker-0")

@@ -1,378 +1,376 @@
 #!/usr/bin/env python3
 """
-REAL distributed training example using CIFAR-10 dataset.
-This actually downloads data, trains a model, and uses the coordinator.
+Real distributed training example using CIFAR-10 (with PyTorch) or synthetic
+dataset (pure Python / numpy fallback when torch is not installed), wired to
+dtruntime.TrainingOrchestrator and dtruntime.CheckpointManager.
 """
 
+import argparse
 import asyncio
-import grpc
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import torchvision
-import torchvision.transforms as transforms
 import json
-import time
-import os
+import math
+import random
 import sys
-from pathlib import Path
-import requests
 from datetime import datetime
+from pathlib import Path
 
-class SimpleCNN(nn.Module):
-    """Simple CNN for CIFAR-10 classification"""
-    def __init__(self):
-        super(SimpleCNN, self).__init__()
-        self.conv1 = nn.Conv2d(3, 32, 3, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.fc1 = nn.Linear(64 * 8 * 8, 512)
-        self.fc2 = nn.Linear(512, 10)
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(0.5)
-        
-    def forward(self, x):
-        x = self.pool(self.relu(self.conv1(x)))
-        x = self.pool(self.relu(self.conv2(x)))
-        x = x.view(-1, 64 * 8 * 8)
-        x = self.dropout(self.relu(self.fc1(x)))
-        x = self.fc2(x)
-        return x
+from dtruntime import CheckpointManager, TrainingOrchestrator
+
+try:
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    import torchvision
+    import torchvision.transforms as transforms
+
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
+
+try:
+    import numpy as np
+
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+
+
+if HAS_TORCH:
+
+    class SimpleCNN(nn.Module):
+        """Simple CNN for CIFAR-10 classification."""
+
+        def __init__(self):
+            super().__init__()
+            self.conv1 = nn.Conv2d(3, 32, 3, padding=1)
+            self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
+            self.pool = nn.MaxPool2d(2, 2)
+            self.fc1 = nn.Linear(64 * 8 * 8, 512)
+            self.fc2 = nn.Linear(512, 10)
+            self.relu = nn.ReLU()
+            self.dropout = nn.Dropout(0.5)
+
+        def forward(self, x):
+            x = self.pool(self.relu(self.conv1(x)))
+            x = self.pool(self.relu(self.conv2(x)))
+            x = x.view(-1, 64 * 8 * 8)
+            x = self.dropout(self.relu(self.fc1(x)))
+            return self.fc2(x)
+
 
 class RealDistributedTrainer:
-    def __init__(self, worker_id: str, coordinator_url: str, rank: int = 0, world_size: int = 1):
+    def __init__(
+        self,
+        worker_id: str,
+        coordinator_url: str,
+        rank: int = 0,
+        world_size: int = 1,
+        checkpoint_dir: str = "./checkpoints",
+    ):
         self.worker_id = worker_id
         self.coordinator_url = coordinator_url
         self.rank = rank
         self.world_size = world_size
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model = None
-        self.optimizer = None
-        self.criterion = None
         self.current_epoch = 0
         self.current_step = 0
         self.best_accuracy = 0.0
-        
-        print(f"🚀 Initializing Real Distributed Trainer")
-        print(f"   Worker ID: {worker_id}")
-        print(f"   Rank: {rank}/{world_size}")
-        print(f"   Device: {self.device}")
-        print(f"   Coordinator: {coordinator_url}")
-        
+
+        self.orchestrator = TrainingOrchestrator(
+            coordinator_url=coordinator_url,
+            worker_id=worker_id,
+            world_size=world_size,
+            rank=rank,
+        )
+        self.ckpt_dir = Path(checkpoint_dir)
+        self.ckpt_dir.mkdir(parents=True, exist_ok=True)
+        self.checkpoint_manager = CheckpointManager(str(self.ckpt_dir), keep_count=5)
+
+        if HAS_TORCH:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = "cpu-fallback"
+
+        self.model = None
+        self.optimizer = None
+        self.criterion = None
+        self.trainloader = None
+        self.testloader = None
+        self.fallback_weights = None
+        self.fallback_dataset = None
+
+    def connect_and_register(self):
+        config = self.orchestrator.register_worker(
+            worker_id=self.worker_id,
+            hostname="127.0.0.1",
+            port=50052 + self.rank,
+            gpu_count=1 if (HAS_TORCH and torch.cuda.is_available()) else 0,
+        )
+        self.rank = config.rank
+        self.world_size = config.world_size
+        print(
+            f"[{self.worker_id}] Registered with coordinator as rank "
+            f"{config.rank}/{config.world_size}"
+        )
+        return config
+
     def download_and_prepare_data(self):
-        """Download CIFAR-10 dataset and prepare data loaders"""
-        print("📥 Downloading CIFAR-10 dataset...")
-        
-        # Create data directory
-        data_dir = Path("./data")
-        data_dir.mkdir(exist_ok=True)
-        
-        # Data transformations
-        transform_train = transforms.Compose([
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-        ])
-        
-        transform_test = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-        ])
-        
-        # Download datasets
-        trainset = torchvision.datasets.CIFAR10(
-            root=str(data_dir), train=True, download=True, transform=transform_train
-        )
-        
-        testset = torchvision.datasets.CIFAR10(
-            root=str(data_dir), train=False, download=True, transform=transform_test
-        )
-        
-        # Create data loaders with distributed sampling
-        batch_size = 32
-        
-        # For distributed training, we'd use DistributedSampler
-        # For now, simulate by taking a subset based on rank
-        if self.world_size > 1:
-            # Simulate distributed data loading
-            subset_size = len(trainset) // self.world_size
-            start_idx = self.rank * subset_size
-            end_idx = start_idx + subset_size
-            
-            indices = list(range(start_idx, min(end_idx, len(trainset))))
-            trainset = torch.utils.data.Subset(trainset, indices)
-            
-            print(f"📊 Worker {self.rank} assigned {len(indices)} training samples")
-        
-        self.trainloader = torch.utils.data.DataLoader(
-            trainset, batch_size=batch_size, shuffle=True, num_workers=2
-        )
-        
-        self.testloader = torch.utils.data.DataLoader(
-            testset, batch_size=batch_size, shuffle=False, num_workers=2
-        )
-        
-        print(f"✅ Data loaded: {len(trainset)} training samples, {len(testset)} test samples")
-        
-        # Register dataset with coordinator
-        self.register_dataset_with_coordinator(len(trainset))
-        
-    def register_dataset_with_coordinator(self, total_samples):
-        """Register the dataset with the coordinator"""
-        try:
-            # This would use gRPC in real implementation
-            # For now, just log the registration
-            dataset_info = {
-                "dataset_id": "cifar10-train",
-                "worker_id": self.worker_id,
-                "total_samples": total_samples,
-                "shard_size": len(self.trainloader.dataset),
-                "format": "pytorch",
-                "registered_at": datetime.now().isoformat()
-            }
-            
-            print(f"📋 Registered dataset with coordinator: {dataset_info}")
-            
-        except Exception as e:
-            print(f"⚠️  Failed to register dataset: {e}")
-    
+        if HAS_TORCH:
+            data_dir = Path("./data")
+            data_dir.mkdir(exist_ok=True)
+
+            transform_train = transforms.Compose(
+                [
+                    transforms.RandomCrop(32, padding=4),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+                ]
+            )
+            transform_test = transforms.Compose(
+                [
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+                ]
+            )
+
+            trainset = torchvision.datasets.CIFAR10(
+                root=str(data_dir), train=True, download=True, transform=transform_train
+            )
+            testset = torchvision.datasets.CIFAR10(
+                root=str(data_dir), train=False, download=True, transform=transform_test
+            )
+
+            total_samples = len(trainset)
+            self.orchestrator.register_dataset(
+                dataset_id="cifar10-train",
+                path=str(data_dir),
+                total_samples=total_samples,
+                shard_size=max(1, total_samples // max(1, self.world_size)),
+                format="torchvision",
+                shuffle=True,
+                seed=42,
+            )
+            shard = self.orchestrator.get_shard("cifar10-train", epoch=0)
+            indices = list(range(shard.start_index, min(shard.end_index, total_samples)))
+            if indices:
+                trainset = torch.utils.data.Subset(trainset, indices)
+
+            self.trainloader = torch.utils.data.DataLoader(
+                trainset, batch_size=32, shuffle=True, num_workers=0
+            )
+            self.testloader = torch.utils.data.DataLoader(
+                testset, batch_size=32, shuffle=False, num_workers=0
+            )
+            print(f"[{self.worker_id}] Prepared CIFAR-10 shard: {len(trainset)} samples")
+        else:
+            total_samples = 1000
+            self.orchestrator.register_dataset(
+                dataset_id="cifar10-synthetic",
+                path="./data",
+                total_samples=total_samples,
+                shard_size=max(1, total_samples // max(1, self.world_size)),
+                format="synthetic",
+                shuffle=True,
+                seed=42,
+            )
+            shard = self.orchestrator.get_shard("cifar10-synthetic", epoch=0)
+            num_samples = max(10, shard.end_index - shard.start_index)
+            rng = random.Random(42 + self.rank)
+            if HAS_NUMPY:
+                np_rng = np.random.default_rng(42 + self.rank)
+                x = np_rng.normal(0.0, 1.0, size=(num_samples, 16))
+                true_w = np.linspace(-1.0, 1.0, 16)
+                y = (x @ true_w > 0).astype(np.float64)
+                self.fallback_dataset = (x, y)
+                self.fallback_weights = np.zeros(16, dtype=np.float64)
+            else:
+                x = [[rng.gauss(0.0, 1.0) for _ in range(16)] for _ in range(num_samples)]
+                true_w = [(-1.0 + 2.0 * i / 15.0) for i in range(16)]
+                y = [1.0 if sum(a * b for a, b in zip(row, true_w)) > 0 else 0.0 for row in x]
+                self.fallback_dataset = (x, y)
+                self.fallback_weights = [0.0] * 16
+            print(
+                f"[{self.worker_id}] PyTorch not installed; prepared synthetic shard "
+                f"[{shard.start_index}, {shard.end_index}) ({num_samples} samples)"
+            )
+
     def initialize_model(self):
-        """Initialize the model, optimizer, and loss function"""
-        print("🧠 Initializing model...")
-        
-        self.model = SimpleCNN().to(self.device)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
-        self.criterion = nn.CrossEntropyLoss()
-        
-        # Print model info
-        total_params = sum(p.numel() for p in self.model.parameters())
-        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        
-        print(f"   Total parameters: {total_params:,}")
-        print(f"   Trainable parameters: {trainable_params:,}")
-        
-    async def send_heartbeat_to_coordinator(self):
-        """Send heartbeat with current training status"""
-        try:
-            # This would use gRPC heartbeat in real implementation
-            heartbeat_data = {
-                "worker_id": self.worker_id,
-                "status": "training",
-                "current_epoch": self.current_epoch,
-                "current_step": self.current_step,
-                "device": str(self.device),
-                "timestamp": datetime.now().isoformat()
-            }
-            
-            # For demo, just log it
-            if self.current_step % 50 == 0:  # Every 50 steps
-                print(f"💓 Heartbeat sent: Epoch {self.current_epoch}, Step {self.current_step}")
-                
-        except Exception as e:
-            print(f"⚠️  Heartbeat failed: {e}")
-    
-    async def create_checkpoint(self, accuracy: float):
-        """Create a real checkpoint with model weights"""
-        try:
-            checkpoint_dir = Path("./checkpoints")
-            checkpoint_dir.mkdir(exist_ok=True)
-            
-            checkpoint_path = checkpoint_dir / f"checkpoint_worker_{self.worker_id}_epoch_{self.current_epoch}.pt"
-            
-            # Save actual model state
-            checkpoint_data = {
-                'epoch': self.current_epoch,
-                'step': self.current_step,
-                'model_state_dict': self.model.state_dict(),
-                'optimizer_state_dict': self.optimizer.state_dict(),
-                'accuracy': accuracy,
-                'worker_id': self.worker_id,
-                'timestamp': datetime.now().isoformat()
-            }
-            
-            torch.save(checkpoint_data, checkpoint_path)
-            
-            # Get file size
-            file_size = checkpoint_path.stat().st_size
-            
-            print(f"💾 Checkpoint saved: {checkpoint_path}")
-            print(f"   Size: {file_size / 1024 / 1024:.2f} MB")
-            print(f"   Accuracy: {accuracy:.4f}")
-            
-            # Notify coordinator about checkpoint
-            await self.notify_coordinator_checkpoint(str(checkpoint_path), file_size, accuracy)
-            
-        except Exception as e:
-            print(f"❌ Checkpoint failed: {e}")
-    
-    async def notify_coordinator_checkpoint(self, checkpoint_path: str, size: int, accuracy: float):
-        """Notify coordinator about new checkpoint"""
-        try:
-            # This would use gRPC in real implementation
-            checkpoint_info = {
-                "worker_id": self.worker_id,
-                "checkpoint_id": f"checkpoint_epoch_{self.current_epoch}_{int(time.time())}",
-                "epoch": self.current_epoch,
-                "step": self.current_step,
-                "path": checkpoint_path,
-                "size_bytes": size,
-                "accuracy": accuracy,
-                "timestamp": datetime.now().isoformat()
-            }
-            
-            print(f"📤 Notified coordinator about checkpoint: {checkpoint_info['checkpoint_id']}")
-            
-        except Exception as e:
-            print(f"⚠️  Checkpoint notification failed: {e}")
-    
-    def evaluate_model(self):
-        """Evaluate model on test set"""
+        if HAS_TORCH:
+            self.model = SimpleCNN().to(self.device)
+            self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
+            self.criterion = nn.CrossEntropyLoss()
+
+    async def send_heartbeat(self, state: str = "training", task: str = ""):
+        await self.orchestrator.heartbeat_async(
+            current_step=self.current_step,
+            current_epoch=self.current_epoch,
+            state=state,
+            current_task=task,
+        )
+
+    async def save_and_notify_checkpoint(self, accuracy: float):
+        if HAS_TORCH and self.model is not None:
+            import io
+
+            buf = io.BytesIO()
+            torch.save(
+                {
+                    "epoch": self.current_epoch,
+                    "step": self.current_step,
+                    "model_state_dict": self.model.state_dict(),
+                    "optimizer_state_dict": self.optimizer.state_dict(),
+                    "accuracy": accuracy,
+                },
+                buf,
+            )
+            payload = buf.getvalue()
+        else:
+            weights_list = (
+                self.fallback_weights.tolist()
+                if HAS_NUMPY and isinstance(self.fallback_weights, np.ndarray)
+                else list(self.fallback_weights)
+            )
+            payload = json.dumps(
+                {
+                    "epoch": self.current_epoch,
+                    "step": self.current_step,
+                    "accuracy": accuracy,
+                    "weights": weights_list,
+                    "worker_id": self.worker_id,
+                    "timestamp": datetime.now().isoformat(),
+                }
+            ).encode("utf-8")
+
+        ckpt_id = await self.checkpoint_manager.save_async(
+            payload,
+            step=self.current_step,
+            epoch=self.current_epoch,
+            metadata={"worker_id": self.worker_id, "accuracy": f"{accuracy:.4f}"},
+        )
+        info = self.checkpoint_manager.get_by_step(self.current_step)
+        storage_path = info.path if info is not None else str(self.ckpt_dir / f"{ckpt_id}.ckpt")
+        self.orchestrator.notify_checkpoint(
+            checkpoint_id=ckpt_id,
+            step=self.current_step,
+            epoch=self.current_epoch,
+            storage_path=storage_path,
+            size_bytes=len(payload),
+            checkpoint_type="full",
+            metadata={"accuracy": f"{accuracy:.4f}"},
+        )
+        print(f"[{self.worker_id}] Saved & notified checkpoint {ckpt_id} ({len(payload)} bytes)")
+
+    def _train_fallback_epoch(self) -> float:
+        x, y = self.fallback_dataset
+        lr = 0.05
+        if HAS_NUMPY:
+            n = len(y)
+            for idx in range(0, n, 32):
+                xb = x[idx : idx + 32]
+                yb = y[idx : idx + 32]
+                logits = np.clip(xb @ self.fallback_weights, -20.0, 20.0)
+                probs = 1.0 / (1.0 + np.exp(-logits))
+                grad = (xb.T @ (probs - yb)) / len(yb)
+                self.fallback_weights -= lr * grad
+                self.current_step += 1
+            preds = (x @ self.fallback_weights > 0).astype(np.float64)
+            return float((preds == y).mean() * 100.0)
+        else:
+            correct = 0
+            for row, label in zip(x, y):
+                z = max(-20.0, min(20.0, sum(a * b for a, b in zip(row, self.fallback_weights))))
+                prob = 1.0 / (1.0 + math.exp(-z))
+                err = prob - label
+                for j in range(len(self.fallback_weights)):
+                    self.fallback_weights[j] -= lr * err * row[j]
+                if (prob >= 0.5) == (label >= 0.5):
+                    correct += 1
+                self.current_step += 1
+            return 100.0 * correct / max(1, len(y))
+
+    def evaluate_torch(self) -> float:
         self.model.eval()
         correct = 0
         total = 0
-        
         with torch.no_grad():
-            for data in self.testloader:
-                images, labels = data[0].to(self.device), data[1].to(self.device)
+            for images, labels in self.testloader:
+                images, labels = images.to(self.device), labels.to(self.device)
                 outputs = self.model(images)
                 _, predicted = torch.max(outputs.data, 1)
                 total += labels.size(0)
                 correct += (predicted == labels).sum().item()
-        
-        accuracy = 100 * correct / total
+        return 100.0 * correct / max(1, total)
+
+    async def train_epoch(self) -> float:
+        if HAS_TORCH:
+            self.model.train()
+            for inputs, labels in self.trainloader:
+                inputs, labels = inputs.to(self.device), labels.to(self.device)
+                self.optimizer.zero_grad()
+                outputs = self.model(inputs)
+                loss = self.criterion(outputs, labels)
+                loss.backward()
+                self.optimizer.step()
+                self.current_step += 1
+                if self.current_step % 50 == 0:
+                    await self.send_heartbeat(task=f"epoch_{self.current_epoch}")
+            self.current_epoch += 1
+            accuracy = self.evaluate_torch()
+        else:
+            accuracy = self._train_fallback_epoch()
+            self.current_epoch += 1
+            await self.send_heartbeat(task=f"epoch_{self.current_epoch}")
+
+        print(f"[{self.worker_id}] Epoch {self.current_epoch} accuracy: {accuracy:.2f}%")
+        if accuracy >= self.best_accuracy:
+            self.best_accuracy = accuracy
+            await self.save_and_notify_checkpoint(accuracy)
         return accuracy
-    
-    async def train_epoch(self):
-        """Train for one epoch"""
-        self.model.train()
-        running_loss = 0.0
-        correct = 0
-        total = 0
-        
-        print(f"🏃 Starting epoch {self.current_epoch + 1}")
-        
-        for i, data in enumerate(self.trainloader):
-            inputs, labels = data[0].to(self.device), data[1].to(self.device)
-            
-            # Zero gradients
-            self.optimizer.zero_grad()
-            
-            # Forward pass
-            outputs = self.model(inputs)
-            loss = self.criterion(outputs, labels)
-            
-            # Backward pass
-            loss.backward()
-            self.optimizer.step()
-            
-            # Statistics
-            running_loss += loss.item()
-            _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-            
-            self.current_step += 1
-            
-            # Send heartbeat periodically
-            if self.current_step % 50 == 0:
-                await self.send_heartbeat_to_coordinator()
-            
-            # Print progress
-            if i % 100 == 99:  # Every 100 batches
-                avg_loss = running_loss / 100
-                accuracy = 100 * correct / total
-                print(f"   Batch {i+1:4d}: Loss = {avg_loss:.4f}, Accuracy = {accuracy:.2f}%")
-                running_loss = 0.0
-        
-        # Epoch completed
-        self.current_epoch += 1
-        
-        # Evaluate model
-        test_accuracy = self.evaluate_model()
-        print(f"✅ Epoch {self.current_epoch} completed - Test Accuracy: {test_accuracy:.2f}%")
-        
-        # Save checkpoint if accuracy improved
-        if test_accuracy > self.best_accuracy:
-            self.best_accuracy = test_accuracy
-            await self.create_checkpoint(test_accuracy)
-        
-        return test_accuracy
-    
-    async def start_training(self, num_epochs: int = 5):
-        """Start the distributed training process"""
-        print(f"🚀 Starting distributed training for {num_epochs} epochs")
-        print("=" * 60)
-        
+
+    async def start_training(self, num_epochs: int = 3):
         try:
-            # Download and prepare data
+            self.connect_and_register()
             self.download_and_prepare_data()
-            
-            # Initialize model
             self.initialize_model()
-            
-            # Training loop
+
             for epoch in range(num_epochs):
-                accuracy = await self.train_epoch()
-                
-                # Simulate barrier synchronization between epochs
-                if self.world_size > 1:
-                    print(f"🚧 Waiting for barrier synchronization...")
-                    await asyncio.sleep(2)  # Simulate barrier wait
-                    print(f"✅ Barrier released, continuing...")
-            
-            print("🎉 Training completed!")
-            print(f"   Best accuracy: {self.best_accuracy:.2f}%")
-            
-        except KeyboardInterrupt:
-            print("\n🛑 Training interrupted by user")
-        except Exception as e:
-            print(f"❌ Training failed: {e}")
-            raise
+                await self.train_epoch()
+                barrier = await self.orchestrator.wait_barrier_async(
+                    f"epoch-{epoch}-sync", step=self.current_step
+                )
+                print(
+                    f"[{self.worker_id}] Barrier epoch-{epoch}-sync released "
+                    f"({barrier.arrival_order}/{barrier.participants})"
+                )
+
+            await self.send_heartbeat(state="idle", task="complete")
+            print(f"[{self.worker_id}] Training complete! Best accuracy: {self.best_accuracy:.2f}%")
+        finally:
+            try:
+                self.orchestrator.deregister()
+            except Exception:
+                pass
+
 
 async def main():
-    """Main function to run real distributed training"""
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Real Distributed Training with CIFAR-10")
+    parser = argparse.ArgumentParser(description="Real Distributed Training Example")
     parser.add_argument("--worker-id", default="real-worker-01", help="Worker ID")
-    parser.add_argument("--coordinator", default="localhost:50052", help="Coordinator address")
+    parser.add_argument("--coordinator", default="http://localhost:50051", help="Coordinator URL")
     parser.add_argument("--rank", type=int, default=0, help="Worker rank")
     parser.add_argument("--world-size", type=int, default=1, help="Total number of workers")
-    parser.add_argument("--epochs", type=int, default=3, help="Number of epochs")
-    
+    parser.add_argument("--epochs", type=int, default=2, help="Number of epochs")
+    parser.add_argument("--checkpoint-dir", default="./checkpoints", help="Checkpoint directory")
     args = parser.parse_args()
-    
-    print("🎯 REAL Distributed Training Runtime Demo")
-    print("=" * 50)
-    print("This will:")
-    print("  📥 Download CIFAR-10 dataset (60,000 images)")
-    print("  🧠 Train a real CNN model")
-    print("  💾 Create actual model checkpoints")
-    print("  📡 Communicate with coordinator")
-    print("  📊 Show real training progress")
-    print("=" * 50)
-    
-    # Create trainer
+
     trainer = RealDistributedTrainer(
         worker_id=args.worker_id,
         coordinator_url=args.coordinator,
         rank=args.rank,
-        world_size=args.world_size
+        world_size=args.world_size,
+        checkpoint_dir=args.checkpoint_dir,
     )
-    
-    # Start training
     await trainer.start_training(args.epochs)
 
+
 if __name__ == "__main__":
-    # Check if PyTorch is installed
-    try:
-        import torch
-        import torchvision
-        print(f"✅ PyTorch {torch.__version__} detected")
-    except ImportError:
-        print("❌ PyTorch not found. Install with:")
-        print("   pip install torch torchvision")
-        sys.exit(1)
-    
     asyncio.run(main())

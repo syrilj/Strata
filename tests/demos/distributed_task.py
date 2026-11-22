@@ -20,11 +20,12 @@ import threading
 import grpc
 from typing import List
 
-# Add scripts dir to path for imports
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-import coordinator_pb2
-import coordinator_pb2_grpc
+try:
+    from dtruntime import coordinator_pb2, coordinator_pb2_grpc
+except ImportError:
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "python", "dtruntime"))
+    import coordinator_pb2
+    import coordinator_pb2_grpc
 
 # Simple XOR encryption for demo
 def xor_encrypt(data: bytes, key: bytes) -> bytes:

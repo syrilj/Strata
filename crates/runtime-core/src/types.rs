@@ -257,6 +257,131 @@ pub struct TrainingProgress {
     pub eta_seconds: Option<f64>,
 }
 
+/// Structured log event
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LogEvent {
+    /// Unique event identifier
+    pub id: String,
+
+    /// Unix timestamp in milliseconds
+    pub timestamp: i64,
+
+    /// Log level (e.g., "info", "warn", "error", "debug")
+    pub level: String,
+
+    /// Source component (e.g., "coordinator", "checkpoint", "shard_manager")
+    pub source: String,
+
+    /// Human-readable log message
+    pub message: String,
+
+    /// Optional associated task ID
+    pub task_id: Option<String>,
+}
+
+/// Thread-safe bounded event log
+#[derive(Debug)]
+pub struct EventLog {
+    events: parking_lot::RwLock<std::collections::VecDeque<LogEvent>>,
+    capacity: usize,
+    next_seq: std::sync::atomic::AtomicU64,
+}
+
+impl Default for EventLog {
+    fn default() -> Self {
+        Self::new(1000)
+    }
+}
+
+impl EventLog {
+    /// Create a new bounded event log with the given capacity (minimum 1)
+    pub fn new(capacity: usize) -> Self {
+        let cap = capacity.max(1);
+        Self {
+            events: parking_lot::RwLock::new(std::collections::VecDeque::with_capacity(cap)),
+            capacity: cap,
+            next_seq: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+
+    /// Push a new event into the log, evicting the oldest if at capacity
+    pub fn push(
+        &self,
+        level: impl Into<String>,
+        source: impl Into<String>,
+        message: impl Into<String>,
+        task_id: Option<String>,
+    ) -> LogEvent {
+        let seq = self
+            .next_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let event = LogEvent {
+            id: format!("evt_{}", seq),
+            timestamp: Utc::now().timestamp_millis(),
+            level: level.into(),
+            source: source.into(),
+            message: message.into(),
+            task_id,
+        };
+
+        let mut events = self.events.write();
+        if events.len() >= self.capacity {
+            events.pop_front();
+        }
+        events.push_back(event.clone());
+        event
+    }
+
+    /// Return up to `limit` most recent events (newest first)
+    pub fn recent(&self, limit: usize) -> Vec<LogEvent> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let events = self.events.read();
+        events.iter().rev().take(limit).cloned().collect()
+    }
+
+    /// Return up to `limit` most recent events matching optional filters (newest first)
+    pub fn filtered(
+        &self,
+        level: Option<&str>,
+        source: Option<&str>,
+        task_id: Option<&str>,
+        limit: usize,
+    ) -> Vec<LogEvent> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let events = self.events.read();
+        events
+            .iter()
+            .rev()
+            .filter(|e| {
+                level.is_none_or(|l| e.level.eq_ignore_ascii_case(l))
+                    && source.is_none_or(|s| e.source == s)
+                    && task_id.is_none_or(|t| e.task_id.as_deref() == Some(t))
+            })
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    /// Remove all events from the log
+    pub fn clear(&self) {
+        self.events.write().clear();
+    }
+
+    /// Current number of stored events
+    pub fn len(&self) -> usize {
+        self.events.read().len()
+    }
+
+    /// Returns true if the event log has no entries
+    pub fn is_empty(&self) -> bool {
+        self.events.read().is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +397,33 @@ mod tests {
         assert_eq!(barrier.arrival_order("worker-1"), Some(1));
         assert_eq!(barrier.arrival_order("worker-2"), Some(2));
         assert_eq!(barrier.arrival_order("worker-3"), Some(3));
+    }
+
+    #[test]
+    fn test_event_log_bounded_and_filtered() {
+        let log = EventLog::new(3);
+        assert!(log.is_empty());
+
+        log.push("info", "coordinator", "msg 1", None);
+        log.push("warn", "checkpoint", "msg 2", Some("task-1".to_string()));
+        log.push("error", "coordinator", "msg 3", Some("task-1".to_string()));
+        log.push("info", "shard_manager", "msg 4", Some("task-2".to_string()));
+
+        assert_eq!(log.len(), 3);
+        let recent = log.recent(10);
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0].message, "msg 4");
+        assert_eq!(recent[2].message, "msg 2");
+
+        let by_task = log.filtered(None, None, Some("task-1"), 10);
+        assert_eq!(by_task.len(), 2);
+        assert_eq!(by_task[0].message, "msg 3");
+
+        let by_level_source = log.filtered(Some("ERROR"), Some("coordinator"), None, 10);
+        assert_eq!(by_level_source.len(), 1);
+        assert_eq!(by_level_source[0].message, "msg 3");
+
+        log.clear();
+        assert!(log.is_empty());
     }
 }

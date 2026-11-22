@@ -11,9 +11,12 @@ import random
 import socket
 import grpc
 
-sys.path.insert(0, '/app/proto')
-import coordinator_pb2
-import coordinator_pb2_grpc
+try:
+    from dtruntime import coordinator_pb2, coordinator_pb2_grpc
+except ImportError:
+    sys.path.insert(0, str(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "python", "dtruntime")))
+    import coordinator_pb2
+    import coordinator_pb2_grpc
 
 # Stock assignments based on worker ID
 STOCK_DATA = {

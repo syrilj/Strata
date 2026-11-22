@@ -1,6 +1,18 @@
 import { useDashboardStore } from '../store'
 
-function Stat({ label, value, unit, sub, first = false }: { label: string; value: string; unit?: string; sub: string; first?: boolean }) {
+function Stat({
+  label,
+  value,
+  unit,
+  sub,
+  first = false,
+}: {
+  label: string
+  value: string
+  unit?: string
+  sub: string
+  first?: boolean
+}) {
   return (
     <div className={`px-5 sm:px-6 py-5 min-w-0 ${first ? '' : 'border-l border-white/[0.07]'}`}>
       <p className="eyebrow">{label}</p>
@@ -13,8 +25,23 @@ function Stat({ label, value, unit, sub, first = false }: { label: string; value
   )
 }
 
+function formatRps(rps: number): string {
+  if (rps >= 1000) {
+    return `${(rps / 1000).toFixed(1)}K`
+  }
+  return Number.isInteger(rps) ? String(rps) : rps.toFixed(1)
+}
+
+function formatStorageBackend(backend?: string): string {
+  if (!backend) return 'Local · live'
+  const normalized = backend.toLowerCase()
+  if (normalized === 's3') return 'S3 · live'
+  if (normalized === 'local') return 'Local · live'
+  return `${backend} · live`
+}
+
 export function MetricsCards() {
-  const { metrics } = useDashboardStore()
+  const { metrics, coordinator } = useDashboardStore()
 
   return (
     <section
@@ -28,13 +55,13 @@ export function MetricsCards() {
           label="Checkpoint throughput"
           value={String(metrics.checkpointThroughput)}
           unit="MB/s"
-          sub="Local NVMe · live"
+          sub={formatStorageBackend(coordinator.storageBackend)}
         />
       </div>
       <div className="border-b sm:border-b xl:border-b-0 border-white/[0.07]">
         <Stat
           label="Coordinator"
-          value={`${(metrics.coordinatorRps / 1000).toFixed(1)}K`}
+          value={formatRps(metrics.coordinatorRps)}
           unit="req/s"
           sub="gRPC capacity"
         />

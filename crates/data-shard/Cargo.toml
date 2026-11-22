@@ -25,6 +25,7 @@ rand_chacha = "0.3"
 criterion = { workspace = true }
 tokio-test = "0.4"
 serde_json = { workspace = true }
+tempfile = "3.10"
 
 [[bench]]
 name = "consistent_hash"

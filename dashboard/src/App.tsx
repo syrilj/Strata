@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useDashboardStore } from './store'
+import { api } from './lib/api'
 import {
   Sidebar,
   Header,
@@ -22,24 +23,27 @@ function DashboardView() {
     <>
       {lastError && (
         <div className="mb-4">
-          <ErrorBanner message={`${lastError}. Retrying automatically — start the coordinator with 'cargo run -p coordinator' or 'docker-compose up'.`} onRetry={fetchLiveData} />
+          <ErrorBanner
+            message={`${lastError}. Retrying automatically — start the coordinator with 'cargo run -p coordinator' or 'docker-compose up'.`}
+            onRetry={fetchLiveData}
+          />
         </div>
       )}
       <MetricsCards />
-      
+
       <div className="grid lg:grid-cols-3 gap-4 lg:gap-6">
         <div className="lg:col-span-2 space-y-4 lg:space-y-6 min-w-0">
           <WorkerList />
           <ThroughputChart />
         </div>
-        
+
         <div className="space-y-4 lg:space-y-6 lg:sticky lg:top-24 self-start min-w-0">
           <DatasetList />
           <BarrierStatus />
           <CheckpointList />
         </div>
       </div>
-      
+
       <div className="mt-4 lg:mt-6">
         <ActivityLog />
       </div>
@@ -57,16 +61,41 @@ function WorkersView() {
 }
 
 function DatasetsView() {
-  const { datasets } = useDashboardStore()
-  const firstDataset = datasets[0]?.id || 'imagenet-1k'
-  
+  const { datasets, selectedDatasetId, setSelectedDatasetId } = useDashboardStore()
+  const activeDatasetId =
+    selectedDatasetId && datasets.some((d) => d.id === selectedDatasetId)
+      ? selectedDatasetId
+      : (datasets[0]?.id ?? '')
+
   return (
     <div className="space-y-6">
       <div className="grid lg:grid-cols-2 gap-6">
         <DatasetList />
         <BarrierStatus />
       </div>
-      <DataPreview datasetId={firstDataset} />
+
+      {datasets.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 card px-5 py-3.5">
+          <div>
+            <p className="eyebrow">Preview target</p>
+            <p className="text-[13px] text-zinc-400">Select a dataset to inspect samples and shards</p>
+          </div>
+          <select
+            value={activeDatasetId}
+            onChange={(e) => setSelectedDatasetId(e.target.value)}
+            className="input !w-auto min-w-[220px]"
+            aria-label="Select dataset to preview"
+          >
+            {datasets.map((ds) => (
+              <option key={ds.id} value={ds.id}>
+                {ds.name} ({ds.id})
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      <DataPreview datasetId={activeDatasetId} />
     </div>
   )
 }
@@ -100,54 +129,122 @@ function ActivityView() {
 }
 
 function SettingsView() {
-  const { coordinator, fetchLiveData } = useDashboardStore()
-  const apiUrl = (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_API_URL || 'http://localhost:51051/api'
-  
+  const { coordinator, fetchLiveData, lastError } = useDashboardStore()
+  const [apiUrlInput, setApiUrlInput] = useState(api.getBaseUrl())
+  const [testing, setTesting] = useState(false)
+  const [statusFeedback, setStatusFeedback] = useState<string | null>(null)
+
+  const handleSaveAndTest = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setTesting(true)
+    setStatusFeedback(null)
+    const saved = api.setBaseUrl(apiUrlInput)
+    setApiUrlInput(saved)
+    try {
+      await api.getStatus()
+      await fetchLiveData()
+      setStatusFeedback(`Connected to ${saved}`)
+    } catch (err) {
+      setStatusFeedback(err instanceof Error ? err.message : 'Failed to connect')
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  const handleReset = async () => {
+    setTesting(true)
+    setStatusFeedback(null)
+    const resetUrl = api.resetBaseUrl()
+    setApiUrlInput(resetUrl)
+    try {
+      await fetchLiveData()
+      setStatusFeedback(`Reset to default (${resetUrl})`)
+    } finally {
+      setTesting(false)
+    }
+  }
+
   return (
     <div className="max-w-xl space-y-4">
       <div className="card p-6 sm:p-7">
         <p className="eyebrow mb-1">Connection</p>
         <h2 className="h-display text-[17px]">Coordinator</h2>
         <p className="text-[13px] text-zinc-500 mt-1 mb-5">gRPC + HTTP API used by this dashboard.</p>
-        
-        <div className="space-y-4">
+
+        <form onSubmit={handleSaveAndTest} className="space-y-4">
           <div>
             <label className="label">Coordinator Address (gRPC)</label>
-            <input
-              type="text"
-              value={coordinator.address}
-              readOnly
-              className="input font-mono"
-            />
+            <input type="text" value={coordinator.address} readOnly className="input font-mono" />
           </div>
-          
+
           <div>
-            <label className="label">HTTP API URL</label>
+            <label className="label" htmlFor="settings-api-url">
+              HTTP API URL
+            </label>
             <input
+              id="settings-api-url"
               type="text"
-              value={apiUrl}
-              readOnly
+              value={apiUrlInput}
+              onChange={(e) => setApiUrlInput(e.target.value)}
+              placeholder="/api or http://localhost:51051/api"
               className="input font-mono"
             />
           </div>
-          
-          <div className={`p-3.5 rounded-lg border ${coordinator.connected ? 'bg-emerald-500/[0.06] border-emerald-500/20' : 'bg-red-500/[0.06] border-red-500/20'}`}>
-            <p className={`text-[13.5px] font-semibold tracking-[-0.01em] flex items-center gap-2 ${coordinator.connected ? 'text-emerald-200' : 'text-red-200'}`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${coordinator.connected ? 'bg-emerald-400 animate-pulse-dot' : 'bg-red-400'}`} aria-hidden="true" />
+
+          <div className="flex flex-wrap gap-2">
+            <button type="submit" disabled={testing} className="btn-primary pressable text-xs">
+              {testing ? 'Testing…' : 'Save & Test Connection'}
+            </button>
+            <button type="button" onClick={handleReset} disabled={testing} className="btn-ghost pressable text-xs">
+              Reset to Default
+            </button>
+          </div>
+
+          {statusFeedback && (
+            <p className="text-[12.5px] text-zinc-300 bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-2 font-mono">
+              {statusFeedback}
+            </p>
+          )}
+
+          <div
+            className={`p-3.5 rounded-lg border ${
+              coordinator.connected
+                ? 'bg-emerald-500/[0.06] border-emerald-500/20'
+                : 'bg-red-500/[0.06] border-red-500/20'
+            }`}
+          >
+            <p
+              className={`text-[13.5px] font-semibold tracking-[-0.01em] flex items-center gap-2 ${
+                coordinator.connected ? 'text-emerald-200' : 'text-red-200'
+              }`}
+            >
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  coordinator.connected ? 'bg-emerald-400 animate-pulse-dot' : 'bg-red-400'
+                }`}
+                aria-hidden="true"
+              />
               {coordinator.connected ? 'Connected to coordinator' : 'Disconnected — start the coordinator'}
             </p>
             <p className="text-xs text-zinc-400 mt-1 tabular">
               {coordinator.connected
                 ? `Uptime: ${Math.floor(coordinator.uptime / 60)}m ${coordinator.uptime % 60}s • v${coordinator.version}`
-                : 'Run: cargo run -p coordinator  or  docker-compose up --build'}
+                : lastError || 'Run: cargo run -p coordinator  or  docker-compose up --build'}
             </p>
+            <div className="flex flex-wrap gap-3 mt-2.5 text-[11.5px] text-zinc-400 font-mono">
+              <span>Storage: {coordinator.storageBackend ?? 'unknown'}</span>
+              <span>Demo mode: {coordinator.demoMode === undefined ? 'unknown' : coordinator.demoMode ? 'enabled' : 'disabled'}</span>
+              {coordinator.httpAddress && <span>HTTP: {coordinator.httpAddress}</span>}
+            </div>
             {!coordinator.connected && (
-              <button onClick={fetchLiveData} className="btn-ghost mt-3 !py-1.5 text-xs">Retry connection</button>
+              <button type="button" onClick={fetchLiveData} className="btn-ghost mt-3 !py-1.5 text-xs">
+                Retry connection
+              </button>
             )}
           </div>
-        </div>
+        </form>
       </div>
-      
+
       <div className="card p-6 sm:p-7">
         <p className="eyebrow mb-1">About</p>
         <h2 className="h-display text-[17px] mb-4">Strata</h2>
@@ -159,7 +256,8 @@ function SettingsView() {
             <span className="text-zinc-500">Runtime:</span> Rust + Tokio • Axum HTTP • Tonic gRPC
           </p>
           <p className="text-zinc-300">
-            <span className="text-zinc-500">Protocol:</span> gRPC / HTTP/2 • Dashboard polls <span className="font-mono">/api/dashboard</span> every 2s
+            <span className="text-zinc-500">Protocol:</span> gRPC / HTTP/2 • Dashboard polls{' '}
+            <span className="font-mono">{api.getBaseUrl()}/dashboard</span> every 2s
           </p>
           <p className="text-zinc-300">
             <span className="text-zinc-500">Repo:</span> <span className="font-mono">github.com/syrilj/Strata</span>
@@ -173,13 +271,13 @@ function SettingsView() {
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard')
   const { startLiveMode, stopLiveMode } = useDashboardStore()
-  
+
   // Start live mode on mount
   useEffect(() => {
     startLiveMode()
     return () => stopLiveMode()
   }, [startLiveMode, stopLiveMode])
-  
+
   const renderView = () => {
     switch (activeTab) {
       case 'workers':
@@ -198,11 +296,11 @@ export default function App() {
         return <DashboardView />
     }
   }
-  
+
   return (
     <div className="flex min-h-screen text-zinc-100 font-sans antialiased bg-[#0a0a0b]">
       <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
-      
+
       <div className="flex-1 min-w-0">
         <div className="sticky top-0 z-30 bg-[#0a0a0b]/90 backdrop-blur-md border-b border-white/[0.07]">
           <div className="max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-10 pt-6 pb-1">

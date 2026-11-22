@@ -6,17 +6,21 @@ license.workspace = true
 
 [dependencies]
 runtime-core = { path = "../runtime-core" }
+storage = { path = "../storage" }
 tokio = { workspace = true }
-tokio-stream = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-bincode = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 bytes = { workspace = true }
 parking_lot = { workspace = true }
+lz4_flex = "0.11"
+
+[features]
+default = []
+s3 = ["storage/s3"]
 
 [dev-dependencies]
 tempfile = "3.10"

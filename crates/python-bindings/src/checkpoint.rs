@@ -1,11 +1,11 @@
 //! Checkpoint manager Python bindings
 //!
-//! Exposes async checkpoint operations with synchronous Python wrappers.
+//! Exposes async checkpoint operations with both synchronous and async Python methods.
 
 use bytes::Bytes;
 use checkpoint::{CheckpointManager as RustCheckpointManager, CheckpointManagerConfig};
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyAny, PyBytes};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,22 +51,30 @@ impl CheckpointInfo {
 }
 
 /// Checkpoint manager for saving and loading training checkpoints
-///
-/// Provides async checkpoint writing with configurable retention.
-///
-/// Example:
-///     ckpt = CheckpointManager("/tmp/checkpoints", keep_count=5)
-///     
-///     # Save a checkpoint
-///     checkpoint_id = ckpt.save(model_bytes, step=1000, epoch=5)
-///     
-///     # Load the latest checkpoint
-///     info = ckpt.latest()
-///     data = ckpt.load(info.checkpoint_id)
 #[pyclass]
 pub struct CheckpointManager {
     inner: Arc<RustCheckpointManager>,
     runtime: Arc<Runtime>,
+}
+
+impl CheckpointManager {
+    fn resolve_checkpoint_id(&self, checkpoint_id_or_step: &Bound<'_, PyAny>) -> PyResult<String> {
+        if let Ok(step) = checkpoint_id_or_step.extract::<u64>() {
+            let info = self.inner.get_by_step(step).ok_or_else(|| {
+                pyo3::exceptions::PyFileNotFoundError::new_err(format!(
+                    "No checkpoint found for step {}",
+                    step
+                ))
+            })?;
+            Ok(info.id)
+        } else if let Ok(ckpt_id) = checkpoint_id_or_step.extract::<String>() {
+            Ok(ckpt_id)
+        } else {
+            Err(pyo3::exceptions::PyTypeError::new_err(
+                "checkpoint_id_or_step must be a checkpoint_id (str) or step (int)",
+            ))
+        }
+    }
 }
 
 #[pymethods]
@@ -87,7 +95,6 @@ impl CheckpointManager {
             ..Default::default()
         };
 
-        // Create tokio runtime for async operations
         let runtime = Runtime::new().map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "Failed to create async runtime: {}",
@@ -109,17 +116,8 @@ impl CheckpointManager {
         }
     }
 
-    /// Save a checkpoint asynchronously
-    ///
-    /// Args:
-    ///     data: Checkpoint data as bytes
-    ///     step: Current training step
-    ///     epoch: Current training epoch
-    ///     metadata: Optional metadata dictionary
-    ///
-    /// Returns:
-    ///     Checkpoint ID string
-    #[pyo3(signature = (data, step, epoch, metadata=None))]
+    /// Save a checkpoint (queues async write and returns checkpoint ID)
+    #[pyo3(signature = (data, step, epoch=0, metadata=None))]
     fn save(
         &self,
         py: Python<'_>,
@@ -132,7 +130,6 @@ impl CheckpointManager {
         let meta = metadata.unwrap_or_default();
         let inner = self.inner.clone();
 
-        // Release GIL during async operation
         py.allow_threads(|| {
             self.runtime.block_on(async move {
                 inner
@@ -154,16 +151,53 @@ impl CheckpointManager {
         })
     }
 
-    /// Load checkpoint data by ID
-    ///
-    /// Args:
-    ///     checkpoint_id: The checkpoint ID to load
-    ///
-    /// Returns:
-    ///     Checkpoint data as bytes
-    fn load(&self, py: Python<'_>, checkpoint_id: &str) -> PyResult<PyObject> {
+    /// Async save a checkpoint, awaiting completion of the write
+    #[pyo3(signature = (data, step, epoch=0, metadata=None))]
+    fn save_async<'py>(
+        &self,
+        py: Python<'py>,
+        data: &Bound<'py, PyBytes>,
+        step: u64,
+        epoch: u64,
+        metadata: Option<HashMap<String, String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let bytes_data = Bytes::copy_from_slice(data.as_bytes());
+        let meta = metadata.unwrap_or_default();
         let inner = self.inner.clone();
-        let ckpt_id = checkpoint_id.to_string();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let ckpt_id = inner
+                .save_async(
+                    bytes_data,
+                    step,
+                    epoch,
+                    runtime_core::CheckpointType::Full,
+                    meta,
+                )
+                .await
+                .map_err(|e| {
+                    pyo3::exceptions::PyIOError::new_err(format!(
+                        "Failed to save checkpoint: {}",
+                        e
+                    ))
+                })?;
+
+            inner.wait_pending().await.map_err(|e| {
+                pyo3::exceptions::PyIOError::new_err(format!(
+                    "Pending checkpoint write failed: {}",
+                    e
+                ))
+            })?;
+
+            Ok(ckpt_id)
+        })
+    }
+
+    /// Load checkpoint data by checkpoint ID (str) or step (int)
+    #[pyo3(signature = (checkpoint_id_or_step))]
+    fn load(&self, py: Python<'_>, checkpoint_id_or_step: &Bound<'_, PyAny>) -> PyResult<PyObject> {
+        let ckpt_id = self.resolve_checkpoint_id(checkpoint_id_or_step)?;
+        let inner = self.inner.clone();
 
         let data = py.allow_threads(|| {
             self.runtime.block_on(async move {
@@ -179,10 +213,57 @@ impl CheckpointManager {
         Ok(PyBytes::new_bound(py, &data).into())
     }
 
+    /// Async load checkpoint data by checkpoint ID (str) or step (int)
+    #[pyo3(signature = (checkpoint_id_or_step))]
+    fn load_async<'py>(
+        &self,
+        py: Python<'py>,
+        checkpoint_id_or_step: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let ckpt_id = self.resolve_checkpoint_id(checkpoint_id_or_step)?;
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let data = inner.load(&ckpt_id).await.map_err(|e| {
+                pyo3::exceptions::PyIOError::new_err(format!("Failed to load checkpoint: {}", e))
+            })?;
+
+            Ok(Python::with_gil(|py| -> PyObject {
+                PyBytes::new_bound(py, &data).into()
+            }))
+        })
+    }
+
+    /// Delete a checkpoint by ID
+    fn delete(&self, py: Python<'_>, checkpoint_id: &str) -> PyResult<bool> {
+        let inner = self.inner.clone();
+        let ckpt_id = checkpoint_id.to_string();
+
+        py.allow_threads(|| {
+            self.runtime.block_on(async move {
+                inner.delete(&ckpt_id).await.map_err(|e| {
+                    pyo3::exceptions::PyIOError::new_err(format!(
+                        "Failed to delete checkpoint: {}",
+                        e
+                    ))
+                })
+            })
+        })
+    }
+
+    /// Return sorted list of checkpoint steps
+    fn list_checkpoints(&self) -> Vec<u64> {
+        let mut steps: Vec<u64> = self
+            .inner
+            .all_checkpoints()
+            .into_iter()
+            .map(|m| m.step)
+            .collect();
+        steps.sort_unstable();
+        steps
+    }
+
     /// Get the latest checkpoint info
-    ///
-    /// Returns:
-    ///     CheckpointInfo or None if no checkpoints exist
     fn latest(&self) -> Option<CheckpointInfo> {
         self.inner.latest().map(|m| CheckpointInfo {
             checkpoint_id: m.id,
@@ -195,12 +276,6 @@ impl CheckpointManager {
     }
 
     /// Get checkpoint info by step
-    ///
-    /// Args:
-    ///     step: Training step to look up
-    ///
-    /// Returns:
-    ///     CheckpointInfo or None if not found
     fn get_by_step(&self, step: u64) -> Option<CheckpointInfo> {
         self.inner.get_by_step(step).map(|m| CheckpointInfo {
             checkpoint_id: m.id,
@@ -213,9 +288,6 @@ impl CheckpointManager {
     }
 
     /// Get all checkpoint infos
-    ///
-    /// Returns:
-    ///     List of CheckpointInfo objects
     fn all_checkpoints(&self) -> Vec<CheckpointInfo> {
         self.inner
             .all_checkpoints()

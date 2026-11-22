@@ -39,10 +39,12 @@ torch = [
 ]
 
 [tool.maturin]
+manifest-path = "crates/python-bindings/Cargo.toml"
 features = ["pyo3/extension-module"]
 python-source = "python"
 module-name = "dtruntime._core"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests/python"]

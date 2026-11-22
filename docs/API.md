@@ -2,33 +2,33 @@
 
 ## Python API
 
-### DatasetRegistry
+### `DatasetRegistry`
 
-Manages dataset registration and shard assignment for distributed data loading.
+Manages dataset registration and shard assignment for distributed data loading (supports local mode with `coordinator_url=None` or coordinator-backed gRPC mode).
 
 ```python
 from dtruntime import DatasetRegistry
 
-registry = DatasetRegistry(coordinator_url: str)
+registry = DatasetRegistry(coordinator_url: str | None = None)
 ```
 
 #### Methods
 
-##### `register(dataset_id: str, path: str, format: str, **kwargs) -> None`
-
-Register a dataset with the coordinator.
-
-**Parameters**:
-- `dataset_id`: Unique identifier for the dataset
-- `path`: Path to dataset (local filesystem or S3)
-- `format`: Data format (`"parquet"`, `"csv"`, `"tfrecord"`)
-- `total_samples` (optional): Total number of samples
-- `shard_size` (optional): Samples per shard (default: 10000)
-- `shuffle` (optional): Whether to shuffle data (default: False)
-- `seed` (optional): Random seed for shuffling
+- `register_worker(worker_id: str) -> None`
+- `remove_worker(worker_id: str) -> None`
+- `register_dataset(dataset_id: str, total_samples: int, shard_size: int, shuffle: bool = True, seed: int = 42, path: str = "", format: str = "parquet") -> None`
+- `register(dataset_id: str, path: str, format: str = "parquet", total_samples: int = 10000, shard_size: int = 1000, shuffle: bool = True, seed: int = 42) -> None`
+- `get_shards(dataset_id: str, worker_id: str, epoch: int = 0) -> list[ShardInfo]`
+- `get_shard(dataset_id: str, worker_id: str | None = None, worker_rank: int | None = None, epoch: int = 0) -> ShardInfo`
+- `advance_epoch(dataset_id: str) -> int`
+- `current_epoch(dataset_id: str) -> int`
+- `active_workers() -> list[str]`
+- `datasets() -> list[str]`
+- Properties: `coordinator_url`, `worker_count`, `dataset_count`
 
 **Example**:
 ```python
+registry = DatasetRegistry("http://localhost:50051")
 registry.register(
     "imagenet",
     "/data/imagenet",
@@ -36,246 +36,170 @@ registry.register(
     total_samples=1_281_167,
     shard_size=10_000,
     shuffle=True,
-    seed=42
+    seed=42,
 )
-```
-
-##### `get_shard(dataset_id: str, worker_rank: int, epoch: int) -> List[str]`
-
-Get shard assignment for a worker.
-
-**Parameters**:
-- `dataset_id`: Dataset identifier
-- `worker_rank`: Worker rank/ID
-- `epoch`: Training epoch number
-
-**Returns**: List of file paths for this worker's shard
-
-**Example**:
-```python
-files = registry.get_shard("imagenet", worker_rank=0, epoch=0)
-# Returns: ["/data/imagenet/shard_0.parquet", "/data/imagenet/shard_5.parquet", ...]
+shard = registry.get_shard("imagenet", worker_rank=0, epoch=0)
+# ShardInfo(dataset_id='imagenet', shard_id=..., start_index=..., end_index=..., file_paths=[...])
 ```
 
 ---
 
-### CheckpointManager
+### `CheckpointManager`
 
-Handles async checkpoint saving and loading.
+Handles synchronous and async checkpoint saving, loading, listing, and deletion.
 
 ```python
 from dtruntime import CheckpointManager
 
-manager = CheckpointManager(storage_path: str, backend: str = "local")
+manager = CheckpointManager(base_path: str, keep_count: int = 5, compression: bool = True)
 ```
-
-**Parameters**:
-- `storage_path`: Base path for checkpoints
-- `backend`: Storage backend (`"local"` or `"s3"`)
 
 #### Methods
 
-##### `async save_async(data: bytes, step: int) -> None`
-
-Asynchronously save a checkpoint.
-
-**Parameters**:
-- `data`: Checkpoint data (serialized model state)
-- `step`: Training step number
+- `save(data: bytes, step: int, epoch: int = 0, metadata: dict[str, str] | None = None) -> str`
+- `async save_async(data: bytes, step: int, epoch: int = 0, metadata: dict[str, str] | None = None) -> str`
+- `load(checkpoint_id_or_step: str | int) -> bytes`
+- `async load_async(checkpoint_id_or_step: str | int) -> bytes`
+- `delete(checkpoint_id: str) -> bool`
+- `list_checkpoints() -> list[int]`
+- `latest() -> CheckpointInfo | None`
+- `get_by_step(step: int) -> CheckpointInfo | None`
+- `all_checkpoints() -> list[CheckpointInfo]`
+- `wait_pending() -> None`
 
 **Example**:
 ```python
+import io
 import torch
+from dtruntime import CheckpointManager
 
-# Serialize model
-state_dict = model.state_dict()
-data = torch.save(state_dict)  # Returns bytes
+manager = CheckpointManager("/tmp/checkpoints", keep_count=5, compression=True)
 
-# Save asynchronously (non-blocking)
-await manager.save_async(data, step=1000)
-```
+buf = io.BytesIO()
+torch.save(model.state_dict(), buf)
+ckpt_id = await manager.save_async(buf.getvalue(), step=1000, epoch=2)
 
-##### `async load(step: int) -> bytes`
-
-Load a checkpoint from storage.
-
-**Parameters**:
-- `step`: Training step number to load
-
-**Returns**: Checkpoint data as bytes
-
-**Example**:
-```python
-data = await manager.load(step=1000)
-state_dict = torch.load(io.BytesIO(data))
-model.load_state_dict(state_dict)
-```
-
-##### `async list_checkpoints() -> List[int]`
-
-List all available checkpoint steps.
-
-**Returns**: Sorted list of checkpoint step numbers
-
-**Example**:
-```python
-steps = await manager.list_checkpoints()
-# Returns: [100, 200, 300, 400, 500]
-latest_step = steps[-1]
+raw = await manager.load_async(1000)  # load by step or checkpoint_id
+state_dict = torch.load(io.BytesIO(raw))
+steps = manager.list_checkpoints()
 ```
 
 ---
 
-### TrainingOrchestrator
+### `TrainingOrchestrator`
 
-High-level orchestration for distributed training.
+High-level gRPC orchestration client for distributed training workers.
 
 ```python
 from dtruntime import TrainingOrchestrator
 
 orchestrator = TrainingOrchestrator(
-    worker_id: str,
     coordinator_url: str,
-    world_size: int,
-    rank: int
+    worker_id: str | None = None,
+    world_size: int | None = None,
+    rank: int | None = None,
 )
 ```
 
 **Parameters**:
-- `worker_id`: Unique worker identifier
-- `coordinator_url`: Coordinator server address (e.g., `"http://localhost:50051"`)
-- `world_size`: Total number of workers
-- `rank`: This worker's rank (0 to world_size-1)
+- `coordinator_url`: Coordinator server address (e.g., `"http://localhost:50051"` or `"localhost:50051"`)
+- `worker_id` (optional): Worker identifier (may also be supplied to `register_worker`)
+- `world_size` (optional): Expected world size hint
+- `rank` (optional): Worker rank hint
 
 #### Methods
 
-##### `async register_worker(ip: str, port: int, **kwargs) -> str`
-
-Register this worker with the coordinator.
-
-**Parameters**:
-- `ip`: Worker IP address
-- `port`: Worker port
-- `gpu_count` (optional): Number of GPUs
-- `memory_bytes` (optional): Available memory
-
-**Returns**: Assigned worker ID from coordinator
-
-**Example**:
-```python
-assigned_id = await orchestrator.register_worker(
-    ip="192.168.1.10",
-    port=8080,
-    gpu_count=8,
-    memory_bytes=512 * 1024**3  # 512 GB
-)
-```
-
-##### `async wait_barrier(barrier_id: str) -> None`
-
-Synchronization barrier for distributed training.
-
-**Parameters**:
-- `barrier_id`: Unique barrier identifier
-
-**Blocks** until all workers in `world_size` reach this barrier.
+- `connect() -> None`
+- `register_worker(worker_id: str | None = None, hostname: str = "127.0.0.1", port: int = 50052, gpu_count: int = 0, memory_bytes: int = 0, ip: str | None = None, metadata: dict[str, str] | None = None) -> WorkerConfig`
+- `async register_worker_async(worker_id: str | None = None, hostname: str = "127.0.0.1", port: int = 50052, gpu_count: int = 0, memory_bytes: int = 0, ip: str | None = None, metadata: dict[str, str] | None = None) -> WorkerConfig`
+- `heartbeat(current_step: int = 0, current_epoch: int = 0, state: str = "training", current_task: str = "", cpu_percent: float = 0.0, memory_used_bytes: int = 0) -> bool`
+- `heartbeat_with_commands(current_step: int = 0, current_epoch: int = 0, state: str = "training", current_task: str = "", cpu_percent: float = 0.0, memory_used_bytes: int = 0) -> tuple[bool, list[str]]`
+- `async heartbeat_async(current_step: int = 0, current_epoch: int = 0, state: str = "training", current_task: str = "", cpu_percent: float = 0.0, memory_used_bytes: int = 0) -> bool`
+- `register_dataset(dataset_id: str, path: str, total_samples: int, shard_size: int, format: str = "parquet", shuffle: bool = True, seed: int = 42) -> bool`
+- `get_shard(dataset_id: str, epoch: int = 0) -> CoordinatorShardInfo`
+- `notify_checkpoint(checkpoint_id: str, step: int, epoch: int, storage_path: str, size_bytes: int, checkpoint_type: str = "full", metadata: dict[str, str] | None = None) -> bool`
+- `get_latest_checkpoint(job_id: str = "") -> CoordinatorCheckpointInfo | None`
+- `barrier(barrier_id: str, step: int = 0) -> BarrierResult`
+- `wait_barrier(barrier_id: str, step: int = 0) -> BarrierResult`
+- `async wait_barrier_async(barrier_id: str, step: int = 0) -> BarrierResult`
+- `deregister() -> None`
+- Properties: `coordinator_url`, `worker_id`, `world_size`, `rank`, `last_commands`
 
 **Example**:
 ```python
-# All workers must reach this point before any continue
-await orchestrator.wait_barrier("start_epoch_5")
+import asyncio
+import socket
+from dtruntime import TrainingOrchestrator
 
-# Training continues after all workers arrive
-for batch in dataloader:
-    train_step(model, batch)
+async def main():
+    orch = TrainingOrchestrator(
+        coordinator_url="http://localhost:50051",
+        worker_id="worker-0",
+        world_size=2,
+        rank=0,
+    )
+    config = await orch.register_worker_async(
+        hostname=socket.gethostname(),
+        port=50052,
+        gpu_count=4,
+        memory_bytes=64 * 1024**3,
+    )
+    print(f"Registered rank {config.rank}/{config.world_size}")
+
+    await orch.wait_barrier_async("epoch-0-start", step=0)
+    await orch.heartbeat_async(current_step=1, current_epoch=0, state="training", current_task="train")
+    orch.deregister()
+
+asyncio.run(main())
 ```
-
-##### `async heartbeat() -> None`
-
-Send heartbeat to coordinator (called automatically).
 
 ---
 
-## Full Training Example
+## HTTP REST API
 
-```python
-import asyncio
-from dtruntime import DatasetRegistry, CheckpointManager, TrainingOrchestrator
-import torch
-import torch.distributed as dist
+The coordinator exposes an HTTP REST API (default port `51051`, configurable via `HTTP_ADDR`).
 
-async def main():
-    # Initialize
-    rank = int(os.environ["RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
-    
-    orch = TrainingOrchestrator(
-        worker_id=f"worker-{rank}",
-        coordinator_url="http://coordinator:50051",
-        world_size=world_size,
-        rank=rank
-    )
-    
-    # Register worker
-    await orch.register_worker(
-        ip=socket.gethostbyname(socket.gethostname()),
-        port=8080
-    )
-    
-    # Setup dataset
-    registry = DatasetRegistry("http://coordinator:50051")
-    registry.register("imagenet", "/data/imagenet", "parquet")
-    
-    # Get shard for this worker
-    shard_files = registry.get_shard("imagenet", worker_rank=rank, epoch=0)
-    
-    # Setup checkpointing
-    ckpt_mgr = CheckpointManager("/checkpoints", backend="s3")
-    
-    # Initialize model
-    model = YourModel()
-    optimizer = torch.optim.Adam(model.parameters())
-    
-    # Recovery from checkpoint
-    try:
-        ckpt_data = await ckpt_mgr.load(step=0)  # Load latest
-        state = torch.load(io.BytesIO(ckpt_data))
-        model.load_state_dict(state["model"])
-        optimizer.load_state_dict(state["optimizer"])
-        start_step = state["step"]
-    except FileNotFoundError:
-        start_step = 0
-    
-    # Training loop
-    dataloader = create_dataloader(shard_files)
-    
-    for step in range(start_step, total_steps):
-        # Barrier sync at epoch boundaries
-        if step % steps_per_epoch == 0:
-            await orch.wait_barrier(f"epoch_{step // steps_per_epoch}")
-        
-        # Train
-        batch = next(dataloader)
-        loss = train_step(model, batch, optimizer)
-        
-        # Checkpoint
-        if step % checkpoint_interval == 0:
-            state = {
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "step": step,
-            }
-            data = io.BytesIO()
-            torch.save(state, data)
-            await ckpt_mgr.save_async(data.getvalue(), step=step)
-            
-            print(f"Step {step}, Loss: {loss:.4f}")
-    
-    print("Training complete!")
+### Health & Status
 
-if __name__ == "__main__":
-    asyncio.run(main())
-```
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/health` | Liveness check (`{"status": "ok"}`) |
+| `GET` | `/api/status` | Coordinator status (`connected`, `address`, `http_address`, `uptime`, `version`, `storage_backend`, `demo_mode`) |
+| `GET` | `/api/dashboard` | Consolidated snapshot (`coordinator`, `workers`, `datasets`, `checkpoints`, `barriers`, `metrics`, `tasks`, `logs`) |
+
+### Workers
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/workers` | List all registered workers and their resource usage |
+| `GET` | `/api/workers/:id` | Get a single worker by ID (`404` if not found) |
+| `DELETE` | `/api/workers/:id` | Deregister a worker by ID |
+
+### Datasets
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/datasets` | List all registered datasets |
+| `POST` | `/api/datasets` | Register a dataset (`name`, `path`, `format`, `shard_size`, optional `id`, `total_samples`, `shuffle`, `seed`) |
+| `DELETE` | `/api/datasets/:id` | Remove a registered dataset |
+| `GET` | `/api/datasets/:id/shards` | List shard assignments for a dataset (`?epoch=0`) |
+| `GET` | `/api/datasets/:id/preview` | Preview real sample rows from local files (`csv`, `jsonl`, `ndjson`, `json`, `txt`) or real shard metadata |
+
+### Checkpoints, Barriers, Metrics, Tasks & Logs
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/checkpoints` | List recorded checkpoints |
+| `GET` | `/api/checkpoints/:id` | Get a single checkpoint (`404` if not found) |
+| `DELETE` | `/api/checkpoints/:id` | Delete a checkpoint |
+| `GET` | `/api/barriers` | List active and recently completed barriers |
+| `GET` | `/api/metrics` | Current metrics (`checkpoint_throughput`, `coordinator_rps`, `active_workers`, `total_workers`, `barrier_latency_p99`, `shard_assignment_time`) |
+| `GET` | `/api/metrics/history` | Rolling throughput/RPS history points |
+| `GET` | `/api/tasks` | List training tasks |
+| `POST` | `/api/tasks` | Create a training task (`name`, `type`, `dataset_id`, `worker_count`, `config`) |
+| `POST` | `/api/tasks/:task_id/stop` | Stop a task and enqueue `STOP_TASK` commands to assigned workers |
+| `GET` | `/api/tasks/:task_id/logs` | Get logs for a specific task |
+| `GET` | `/api/logs` | Query bounded event logs (`?limit=100&level=...&source=...&task_id=...`) |
 
 ---
 
@@ -291,212 +215,63 @@ cargo doc --no-deps --open
 
 #### `runtime-core`
 
-Core runtime and orchestration logic.
-
-```rust
-use runtime_core::{Runtime, Config, Worker};
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let config = Config::from_file("config.toml")?;
-    let runtime = Runtime::new(config).await?;
-    
-    runtime.start().await?;
-    Ok(())
-}
-```
+Core types, configuration (`RuntimeConfig`), worker registry (`WorkerRegistry`), and bounded structured event logging (`EventLog`).
 
 #### `coordinator`
 
-gRPC coordinator service.
+gRPC coordinator service (`CoordinatorService`, `CoordinatorServer`) and HTTP REST router (`http_api::create_router`).
 
 ```rust
-use coordinator::{CoordinatorService, CoordinatorServiceServer};
-use tonic::transport::Server;
+use coordinator::{CoordinatorServer, CoordinatorService};
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let service = CoordinatorService::new().await?;
-    let addr = "0.0.0.0:50051".parse()?;
-    
-    Server::builder()
-        .add_service(CoordinatorServiceServer::new(service))
-        .serve(addr)
-        .await?;
-    
+    CoordinatorServer::new("0.0.0.0:50051", service).run().await?;
     Ok(())
 }
 ```
 
 #### `checkpoint`
 
-Checkpoint management.
-
-```rust
-use checkpoint::{CheckpointManager, CheckpointWriter};
-use storage::LocalBackend;
-use bytes::Bytes;
-
-let backend = Arc::new(LocalBackend::new("/checkpoints")?);
-let writer = CheckpointWriter::new(backend);
-
-// Write checkpoint
-let data = Bytes::from(vec![1, 2, 3, 4]);
-writer.write_checkpoint("model", 100, data).await?;
-
-// Read checkpoint
-let manager = CheckpointManager::new(backend);
-let loaded = manager.load_checkpoint("model", 100).await?;
-```
+Async checkpoint writer and manager (`CheckpointManager`, `CheckpointManagerConfig`).
 
 #### `data-shard`
 
-Data sharding with consistent hashing.
-
-```rust
-use data_shard::{ShardManager, ConsistentHash};
-
-let manager = ShardManager::new("imagenet", 1000);
-
-// Assign shards for epoch 0
-let shards = manager.assign_shards(0, "worker-1");
-// Returns: [0, 5, 17, 23, ...] (shard IDs)
-
-// Consistent hash ring
-let ring = ConsistentHash::new();
-ring.add_node("worker-1");
-ring.add_node("worker-2");
-
-let node = ring.get_node_for_shard("imagenet", 42)?;
-// Returns: "worker-1" or "worker-2"
-```
+Consistent hashing and dataset shard assignment (`ShardManager`, `ConsistentHashRing`).
 
 #### `storage`
 
-Storage backend abstraction.
-
-```rust
-use storage::{StorageBackend, LocalBackend, S3Backend};
-use bytes::Bytes;
-
-// Local storage
-let local = LocalBackend::new("/data")?;
-local.write("file.bin", Bytes::from("data")).await?;
-
-// S3 storage
-let s3 = S3Backend::new("my-bucket", "us-west-2").await?;
-s3.write("checkpoints/model.bin", data).await?;
-```
+Storage backend abstraction (`StorageBackend`, `LocalStorage`, `S3Storage`).
 
 ---
 
 ## gRPC Protocol
 
-### Service Definition
+See `proto/coordinator.proto` for the full protobuf definition.
 
-See `proto/coordinator.proto` for complete definition.
-
-**Key RPCs**:
-
-```protobuf
-service CoordinatorService {
-    // Worker lifecycle
-    rpc RegisterWorker(WorkerInfo) returns (WorkerRegistration);
-    rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
-    
-    // Dataset management
-    rpc RegisterDataset(DatasetInfo) returns (DatasetRegistration);
-    rpc GetDataShard(ShardRequest) returns (ShardAssignment);
-    
-    // Synchronization
-    rpc WaitBarrier(BarrierRequest) returns (BarrierResponse);
-    
-    // Checkpointing
-    rpc NotifyCheckpoint(CheckpointInfo) returns (CheckpointResponse);
-    rpc GetLatestCheckpoint(RecoveryRequest) returns (RecoveryInfo);
-}
-```
-
-### Message Types
-
-**WorkerInfo**:
-```protobuf
-message WorkerInfo {
-    string worker_id = 1;
-    string hostname = 2;
-    uint32 port = 3;
-    uint32 gpu_count = 4;
-    uint64 memory_bytes = 5;
-    map<string, string> metadata = 6;
-}
-```
-
-**DatasetInfo**:
-```protobuf
-message DatasetInfo {
-    string dataset_id = 1;
-    string path = 2;
-    string format = 3;
-    uint64 total_samples = 4;
-    uint32 shard_size = 5;
-    bool shuffle = 6;
-    uint64 seed = 7;
-    map<string, string> metadata = 8;
-}
-```
-
-**ShardAssignment**:
-```protobuf
-message ShardAssignment {
-    uint32 shard_id = 1;
-    repeated string file_paths = 2;
-    uint64 start_sample = 3;
-    uint64 end_sample = 4;
-}
-```
+**Service RPCs (`coordinator.Coordinator`)**:
+- `RegisterWorker(WorkerInfo) returns (WorkerConfig)`
+- `Heartbeat(HeartbeatRequest) returns (HeartbeatResponse)`
+- `DeregisterWorker(WorkerInfo) returns (WorkerConfig)`
+- `RegisterDataset(DatasetInfo) returns (DatasetAck)`
+- `GetDataShard(ShardRequest) returns (ShardAssignment)`
+- `NotifyCheckpoint(CheckpointInfo) returns (CheckpointAck)`
+- `GetLatestCheckpoint(RecoveryRequest) returns (RecoveryResponse)`
+- `WaitBarrier(BarrierRequest) returns (BarrierResponse)`
+- `StreamHeartbeats(stream HeartbeatRequest) returns (stream HeartbeatResponse)`
 
 ---
 
 ## Configuration
 
-### Runtime Configuration (TOML)
-
-```toml
-[coordinator]
-address = "0.0.0.0:50051"
-heartbeat_interval_ms = 1000
-heartbeat_timeout_ms = 30000
-
-[storage]
-backend = "s3"
-bucket = "my-training-checkpoints"
-region = "us-west-2"
-
-[checkpoint]
-interval_steps = 1000
-keep_last_n = 5
-compression = "gzip"
-
-[dataset]
-default_shard_size = 10000
-prefetch_shards = 2
-```
-
 ### Environment Variables
 
-- `COORDINATOR_URL`: Coordinator address (default: `http://localhost:50051`)
-- `WORKER_ID`: Worker identifier
-- `RANK`: Worker rank in distributed training
-- `WORLD_SIZE`: Total number of workers
-- `RUST_LOG`: Logging level (`trace`, `debug`, `info`, `warn`, `error`)
-
-**Example**:
-```bash
-export COORDINATOR_URL="http://coordinator:50051"
-export WORKER_ID="worker-0"
-export RANK=0
-export WORLD_SIZE=8
-export RUST_LOG=info
-
-python train.py
-```
+- `GRPC_ADDR`: Coordinator gRPC listen address (default: `0.0.0.0:50051`)
+- `HTTP_ADDR`: Coordinator HTTP REST API listen address (default: `0.0.0.0:51051`)
+- `DEMO_MODE`: Set `"true"` to serve seeded demo data; defaults to `"false"` (live mode)
+- `STORAGE_BACKEND`: `"local"` or `"s3"`
+- `CHECKPOINT_DIR`: Local storage/checkpoint directory (default: `./data`)
+- `COORDINATOR_API_URL`: Upstream coordinator HTTP API URL used by `dashboard/serve.py` (default: `http://127.0.0.1:51051`)
+- `COORDINATOR_URL`: Worker target gRPC URL (e.g., `http://localhost:50051`)
+- `RUST_LOG`: Logging filter (e.g., `info,coordinator=debug`)

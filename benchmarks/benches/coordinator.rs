@@ -142,7 +142,27 @@ fn bench_barrier_synchronization(c: &mut Criterion) {
             num_workers,
             |b, &workers| {
                 b.iter_batched(
-                    || start_coordinator_for_bench(&rt),
+                    || {
+                        let addr = start_coordinator_for_bench(&rt);
+                        rt.block_on(async {
+                            let mut client =
+                                CoordinatorClient::connect(addr.clone()).await.unwrap();
+                            for i in 0..workers {
+                                client
+                                    .register_worker(WorkerInfo {
+                                        worker_id: format!("worker-{}", i),
+                                        hostname: "127.0.0.1".to_string(),
+                                        port: 8080 + i,
+                                        gpu_count: 1,
+                                        memory_bytes: 8 * 1024 * 1024 * 1024,
+                                        metadata: Default::default(),
+                                    })
+                                    .await
+                                    .unwrap();
+                            }
+                        });
+                        addr
+                    },
                     |addr| {
                         rt.block_on(async {
                             let barrier_id = format!("barrier-{}", uuid::Uuid::new_v4());
@@ -184,9 +204,25 @@ fn bench_data_shard_assignment(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let addr = start_coordinator_for_bench(&rt);
 
-    // Register dataset
+    let worker_ids: Vec<String> = (0..4).map(|i| format!("shard-worker-{}", i)).collect();
+
+    // Register workers and dataset
     rt.block_on(async {
         let mut client = CoordinatorClient::connect(addr.clone()).await.unwrap();
+        for (i, worker_id) in worker_ids.iter().enumerate() {
+            client
+                .register_worker(WorkerInfo {
+                    worker_id: worker_id.clone(),
+                    hostname: "127.0.0.1".to_string(),
+                    port: 8090 + i as i32,
+                    gpu_count: 1,
+                    memory_bytes: 8 * 1024 * 1024 * 1024,
+                    metadata: Default::default(),
+                })
+                .await
+                .unwrap();
+        }
+
         client
             .register_dataset(DatasetInfo {
                 dataset_id: "bench-dataset".to_string(),
@@ -205,15 +241,19 @@ fn bench_data_shard_assignment(c: &mut Criterion) {
     let mut group = c.benchmark_group("shard_assignment");
     group.throughput(Throughput::Elements(1));
 
+    let mut idx = 0usize;
     group.bench_function("get_shard", |b| {
         let addr = addr.clone();
+        let worker_ids = worker_ids.clone();
         b.iter(|| {
+            let worker_id = worker_ids[idx % worker_ids.len()].clone();
+            idx += 1;
             rt.block_on(async {
                 let mut client = CoordinatorClient::connect(addr.clone()).await.unwrap();
                 client
                     .get_data_shard(ShardRequest {
                         dataset_id: "bench-dataset".to_string(),
-                        worker_id: format!("worker-{}", uuid::Uuid::new_v4()),
+                        worker_id,
                         epoch: 0,
                     })
                     .await

@@ -1,6 +1,6 @@
 # Multi-stage build for the Distributed Training Runtime
 # Stage 1: Build Rust components
-FROM rust:1.82-bookworm AS rust-builder
+FROM rust:1-bookworm AS rust-builder
 
 # Install protobuf compiler
 RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/apt/lists/*
@@ -70,12 +70,13 @@ WORKDIR /app
 # Copy coordinator binary
 COPY --from=rust-builder /app/target/release/coordinator /app/coordinator
 
-# Copy dashboard
-COPY --from=dashboard-builder /app/dashboard/dist /app/dashboard
+# Copy built dashboard and reverse-proxy server
+COPY --from=dashboard-builder /app/dashboard/dist /app/dashboard/dist
+COPY dashboard/serve.py /app/dashboard/serve.py
 
 # Copy startup script
 COPY scripts/start_services.sh /app/start_services.sh
-RUN chmod +x /app/start_services.sh
+RUN chmod +x /app/start_services.sh /app/dashboard/serve.py
 
 # Set ownership
 RUN chown -R dtruntime:dtruntime /app

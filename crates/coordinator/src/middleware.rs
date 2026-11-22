@@ -72,14 +72,21 @@ impl RateLimiter {
             *last_update.write() = now;
         }
 
-        // Try to consume a token
-        let current = tokens.load(Ordering::Relaxed);
-        if current > 0 {
-            tokens.fetch_sub(1, Ordering::Relaxed);
+        // Try to consume a token atomically without underflow
+        if tokens
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                if current > 0 {
+                    Some(current - 1)
+                } else {
+                    None
+                }
+            })
+            .is_ok()
+        {
             Ok(())
         } else {
             // Calculate retry-after
-            let retry_after = Duration::from_secs_f64(1.0 / self.rate as f64);
+            let retry_after = Duration::from_secs_f64(1.0 / self.rate.max(1) as f64);
             Err(retry_after)
         }
     }
@@ -132,6 +139,7 @@ impl Default for InputValidator {
     }
 }
 
+#[allow(clippy::result_large_err)]
 impl InputValidator {
     /// Create a new input validator with default settings
     pub fn new() -> Self {

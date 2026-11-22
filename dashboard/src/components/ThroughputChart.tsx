@@ -1,20 +1,29 @@
-import { useEffect, useState } from 'react'
+import { useMemo } from 'react'
 import { LineChart, Line, XAxis, YAxis, ResponsiveContainer, Tooltip, CartesianGrid } from 'recharts'
 import { useDashboardStore } from '../store'
 
-interface DataPoint {
-  time: string
-  throughput: number
-  rps: number
+interface TooltipEntry {
+  dataKey?: string
+  name?: string
+  value?: number
+  stroke?: string
 }
 
-function ChartTooltip({ active, payload, label }: any) {
+function ChartTooltip({
+  active,
+  payload,
+  label,
+}: {
+  active?: boolean
+  payload?: TooltipEntry[]
+  label?: string
+}) {
   if (!active || !payload?.length) return null
   return (
     <div className="rounded-lg border border-white/10 bg-[#17171b] px-3 py-2 shadow-pop">
       <p className="text-[11px] font-mono text-zinc-500 tabular mb-1">{label}</p>
-      {payload.map((p: any) => (
-        <p key={p.dataKey} className="text-[12px] tabular text-zinc-200">
+      {payload.map((p) => (
+        <p key={String(p.dataKey)} className="text-[12px] tabular text-zinc-200">
           <span className="inline-block w-2 h-2 rounded-full mr-1.5" style={{ background: p.stroke }} />
           {p.name}: <span className="font-semibold font-mono">{p.value}</span>
         </p>
@@ -24,25 +33,22 @@ function ChartTooltip({ active, payload, label }: any) {
 }
 
 export function ThroughputChart() {
-  const { metrics } = useDashboardStore()
-  const [data, setData] = useState<DataPoint[]>([])
+  const { throughputHistory } = useDashboardStore()
 
-  useEffect(() => {
-    const now = new Date()
-    const time = now.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
-
-    setData((prev) => {
-      const newData = [
-        ...prev,
-        {
-          time,
-          throughput: metrics.checkpointThroughput,
-          rps: metrics.coordinatorRps / 100,
-        },
-      ]
-      return newData.slice(-30)
-    })
-  }, [metrics.checkpointThroughput, metrics.coordinatorRps])
+  const data = useMemo(
+    () =>
+      throughputHistory.slice(-30).map((point) => ({
+        time: new Date(point.timestamp).toLocaleTimeString('en-US', {
+          hour12: false,
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        }),
+        throughput: point.checkpoints,
+        rps: Number((point.requests / 100).toFixed(2)),
+      })),
+    [throughputHistory]
+  )
 
   return (
     <div className="card overflow-hidden">
@@ -63,7 +69,7 @@ export function ThroughputChart() {
         </div>
       </div>
 
-      {data.length < 2 ? (
+      {data.length === 0 ? (
         <div className="mx-6 mb-6 mt-3 h-[180px] rounded-lg bg-white/[0.02] border border-dashed border-white/10 flex items-center justify-center text-zinc-500 text-[13px]">
           Collecting telemetry…
         </div>
@@ -91,7 +97,7 @@ export function ThroughputChart() {
                 dataKey="throughput"
                 stroke="#34d399"
                 strokeWidth={1.75}
-                dot={false}
+                dot={data.length === 1 ? { r: 3, fill: '#34d399' } : false}
                 activeDot={{ r: 3, fill: '#34d399', stroke: '#0a0a0b', strokeWidth: 2 }}
                 name="Throughput (MB/s)"
                 isAnimationActive={false}
@@ -102,7 +108,7 @@ export function ThroughputChart() {
                 stroke="#8b8b93"
                 strokeWidth={1.5}
                 strokeDasharray="4 3"
-                dot={false}
+                dot={data.length === 1 ? { r: 3, fill: '#8b8b93' } : false}
                 activeDot={{ r: 3, fill: '#8b8b93', stroke: '#0a0a0b', strokeWidth: 2 }}
                 name="RPS (÷100)"
                 isAnimationActive={false}

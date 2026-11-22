@@ -1,122 +1,156 @@
 #!/bin/bash
 # Strata local launcher
-# Starts the coordinator (seeded development data) + dashboard for walkthroughs
+# Starts the coordinator (50051 gRPC / 51051 HTTP) + real workers + dashboard (3000)
+# Pass --demo to run in seeded demo mode (DEMO_MODE=true) without local workers.
 
-set -e
+set -euo pipefail
 
-echo "🚀 Strata - Live Cluster"
+DEMO_FLAG=false
+for arg in "$@"; do
+    case "$arg" in
+        --demo)
+            DEMO_FLAG=true
+            ;;
+        -h|--help)
+            echo "Usage: $0 [--demo]"
+            echo "  (default)  Live mode (DEMO_MODE=false) with real Python workers + dashboard"
+            echo "  --demo     Seeded demo mode (DEMO_MODE=true) without workers"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $arg" >&2
+            exit 1
+            ;;
+    esac
+done
+
+DEMO_MODE_VAL="${DEMO_MODE:-false}"
+if [ "$DEMO_FLAG" = true ]; then
+    DEMO_MODE_VAL="true"
+fi
+
+echo "🚀 Strata - Local Cluster (DEMO_MODE=${DEMO_MODE_VAL})"
 echo "============================================"
 echo ""
-echo "This run shows:"
-echo "  ✅ Active GPU workers training a vision model"
-echo "  ✅ Real-time progress tracking (steps, epochs, loss)"
-echo "  ✅ Checkpoint creation and management"
-echo "  ✅ Dataset sharding and distribution"
-echo "  ✅ Barrier synchronization between workers"
-echo "  ✅ Live system metrics and monitoring"
-echo ""
 
-# Check if coordinator is already running
-if lsof -Pi :50052 -sTCP:LISTEN -t >/dev/null 2>&1; then
-    echo "⚠️  Coordinator already running on port 50052"
+COORDINATOR_PID=""
+DASHBOARD_PID=""
+WORKER_PIDS=()
+
+cleanup() {
+    echo ""
+    echo "🛑 Stopping Strata..."
+    for pid in "${WORKER_PIDS[@]:-}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    if [ -n "$COORDINATOR_PID" ]; then
+        kill "$COORDINATOR_PID" 2>/dev/null || true
+    fi
+    if [ -n "$DASHBOARD_PID" ]; then
+        kill "$DASHBOARD_PID" 2>/dev/null || true
+    fi
+    pkill -f "coordinator.*50051" 2>/dev/null || true
+    pkill -f "scripts/real_worker.py" 2>/dev/null || true
+    pkill -f "scripts/simulated_worker.py" 2>/dev/null || true
+    echo "✅ Stopped"
+    exit 0
+}
+
+trap cleanup SIGINT SIGTERM
+
+# Stop existing coordinator if running on 50051
+if lsof -Pi :50051 -sTCP:LISTEN -t >/dev/null 2>&1; then
+    echo "⚠️  Coordinator already running on port 50051"
     echo "   Stopping existing coordinator..."
-    pkill -f "coordinator.*50052" || true
+    pkill -f "coordinator.*50051" || true
     sleep 2
 fi
 
-# Check if dashboard is already running
+# Start dashboard if not already running on 3000
 if lsof -Pi :3000 -sTCP:LISTEN -t >/dev/null 2>&1; then
-    echo "⚠️  Dashboard already running on port 3000"
-    echo "   You can access it at: http://localhost:3000"
+    echo "⚠️  Dashboard already running on port 3000 (http://localhost:3000)"
 else
     echo "🔧 Starting dashboard..."
-    cd dashboard
-    npm install --silent
-    npm run dev &
+    if [ ! -d "dashboard/node_modules" ]; then
+        npm --prefix dashboard install --silent
+    fi
+    npm --prefix dashboard run dev >/tmp/strata-dashboard.log 2>&1 &
     DASHBOARD_PID=$!
-    cd ..
     echo "   Dashboard starting in background..."
 fi
 
 echo ""
-echo "🎯 Starting coordinator with seeded development data..."
-
-# Start coordinator (seeded development dataset)
-DEMO_MODE=true cargo run --bin coordinator -- 0.0.0.0:50052 &
+echo "🎯 Starting coordinator on 0.0.0.0:50051 (gRPC) and 0.0.0.0:51051 (HTTP)..."
+DEMO_MODE="$DEMO_MODE_VAL" \
+GRPC_ADDR="0.0.0.0:50051" \
+HTTP_ADDR="0.0.0.0:51051" \
+cargo run -p coordinator --bin coordinator -- 0.0.0.0:50051 >/tmp/strata-coordinator.log 2>&1 &
 COORDINATOR_PID=$!
 
-# Optionally start demo workers (uncomment to run)
-# echo "🤖 Starting demo workers..."
-# python3 tests/demos/demo.py &
-# DEMO_WORKERS_PID=$!
+# Wait for coordinator health
+echo "⏳ Waiting for coordinator to initialize..."
+for _ in $(seq 1 30); do
+    if curl -sf http://localhost:51051/api/health >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
 
-# Wait for services to start
-echo ""
-echo "⏳ Waiting for services to initialize..."
-sleep 5
-
-# Check if services are running
-if curl -s http://localhost:51052/api/health >/dev/null 2>&1; then
+if curl -sf http://localhost:51051/api/health >/dev/null 2>&1; then
     echo "✅ Coordinator API ready"
 else
-    echo "❌ Coordinator failed to start"
+    echo "❌ Coordinator failed to start. Check /tmp/strata-coordinator.log"
     exit 1
 fi
 
-if curl -s http://localhost:3000 >/dev/null 2>&1; then
+if [ "$DEMO_MODE_VAL" != "true" ]; then
+    echo "🤖 Starting real Python workers..."
+    if python3 -c "import dtruntime" >/dev/null 2>&1; then
+        for i in 1 2; do
+            python3 scripts/real_worker.py \
+                --worker-id "gpu-node-${i}" \
+                --coordinator "http://127.0.0.1:50051" \
+                --gpu-count 4 \
+                --port "$((50051 + i))" \
+                >/tmp/strata-worker-${i}.log 2>&1 &
+            WORKER_PIDS+=($!)
+        done
+    else
+        echo "   dtruntime native module not installed; falling back to scripts/simulated_worker.py"
+        for i in 1 2; do
+            COORDINATOR_URL="127.0.0.1:50051" \
+            WORKER_ID="gpu-node-${i}" \
+            GPU_COUNT=4 \
+            python3 scripts/simulated_worker.py >/tmp/strata-worker-${i}.log 2>&1 &
+            WORKER_PIDS+=($!)
+        done
+    fi
+fi
+
+if curl -sf http://localhost:3000 >/dev/null 2>&1; then
     echo "✅ Dashboard ready"
 else
     echo "⏳ Dashboard still starting..."
 fi
 
 echo ""
-echo "🌐 Demo is now running!"
+echo "🌐 Strata is now running!"
 echo "   Dashboard: http://localhost:3000"
-echo "   API: http://localhost:51052/api"
+echo "   HTTP API:  http://localhost:51051/api"
+echo "   gRPC:      localhost:50051"
+echo "   Mode:      $([ "$DEMO_MODE_VAL" = "true" ] && echo "demo" || echo "live")"
 echo ""
-echo "📊 You'll see:"
-echo "   • 3 active workers (2 GPU + 1 CPU)"
-echo "   • Real-time training progress"
-echo "   • ImageNet and custom datasets"
-echo "   • Automatic checkpoint creation"
-echo "   • Live performance metrics"
-echo ""
-echo "Press Ctrl+C to stop the demo"
+echo "Press Ctrl+C to stop all services"
 
-# Function to cleanup on exit
-cleanup() {
-    echo ""
-    echo "🛑 Stopping demo..."
-    if [ ! -z "$COORDINATOR_PID" ]; then
-        kill $COORDINATOR_PID 2>/dev/null || true
-    fi
-    if [ ! -z "$DASHBOARD_PID" ]; then
-        kill $DASHBOARD_PID 2>/dev/null || true
-    fi
-    if [ ! -z "$DEMO_WORKERS_PID" ]; then
-        kill $DEMO_WORKERS_PID 2>/dev/null || true
-    fi
-    pkill -f "coordinator.*50052" 2>/dev/null || true
-    pkill -f "vite.*3000" 2>/dev/null || true
-    pkill -f "tests/demos/demo.py" 2>/dev/null || true
-    echo "✅ Demo stopped"
-    exit 0
-}
-
-# Set up signal handlers
-trap cleanup SIGINT SIGTERM
-
-# Keep script running and show live stats
 while true; do
-    if curl -s http://localhost:51052/api/metrics >/dev/null 2>&1; then
-        METRICS=$(curl -s http://localhost:51052/api/metrics)
-        WORKERS=$(echo $METRICS | jq -r '.active_workers // 0')
-        RPS=$(echo $METRICS | jq -r '.coordinator_rps // 0')
-        THROUGHPUT=$(echo $METRICS | jq -r '.checkpoint_throughput // 0')
-        
-        printf "\r⚡ Active Workers: %s | RPS: %s | Checkpoint Throughput: %s/min" "$WORKERS" "$RPS" "$THROUGHPUT"
+    if curl -sf http://localhost:51051/api/metrics >/dev/null 2>&1; then
+        METRICS=$(curl -sf http://localhost:51051/api/metrics)
+        WORKERS=$(echo "$METRICS" | jq -r '.active_workers // 0')
+        RPS=$(echo "$METRICS" | jq -r '.coordinator_rps // 0')
+        THROUGHPUT=$(echo "$METRICS" | jq -r '.checkpoint_throughput // 0')
+        printf "\r⚡ Active Workers: %s | RPS: %s | Checkpoint Throughput: %s MB/s" "$WORKERS" "$RPS" "$THROUGHPUT"
     else
-        printf "\r⏳ Starting services..."
+        printf "\r⏳ Waiting for coordinator metrics..."
     fi
     sleep 2
 done

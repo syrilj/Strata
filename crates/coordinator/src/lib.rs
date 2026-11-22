@@ -26,6 +26,7 @@ pub mod server;
 pub mod service;
 
 // Re-export generated protobuf types
+#[allow(clippy::result_large_err)]
 pub mod proto {
     tonic::include_proto!("coordinator");
 }

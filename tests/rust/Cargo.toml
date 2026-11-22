@@ -5,18 +5,16 @@ edition = "2021"
 publish = false
 
 [dependencies]
-runtime-core = { path = "../../crates/runtime-core" }
+
+[dev-dependencies]
 coordinator = { path = "../../crates/coordinator" }
-checkpoint = { path = "../../crates/checkpoint" }
-data-shard = { path = "../../crates/data-shard" }
-storage = { path = "../../crates/storage" }
 tokio = { version = "1.40", features = ["full", "test-util"] }
-tempfile = "3.10"
-uuid = { version = "1.10", features = ["v4"] }
-tracing = "0.1"
-tracing-subscriber = "0.3"
+tempfile = { workspace = true }
 anyhow = "1.0"
-portpicker = "0.1.1"
-tonic.workspace = true
-prost.workspace = true
+portpicker = { workspace = true }
+tonic = { workspace = true }
 chrono = { workspace = true }
+axum = { workspace = true }
+serde_json = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

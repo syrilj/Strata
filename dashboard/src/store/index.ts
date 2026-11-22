@@ -1,19 +1,17 @@
 import { create } from 'zustand'
-import type { Worker, Dataset, Checkpoint, SystemMetrics, LogEntry, CoordinatorStatus, BarrierStatus } from '../types'
+import type {
+  BarrierStatus,
+  Checkpoint,
+  CoordinatorStatus,
+  Dataset,
+  LogEntry,
+  RegisterDatasetRequest,
+  SystemMetrics,
+  Task,
+  ThroughputDataPoint,
+  Worker,
+} from '../types'
 import { api } from '../lib/api'
-
-interface Task {
-  id: string
-  name: string
-  type: string
-  status: 'running' | 'completed' | 'failed' | 'pending'
-  worker_ids: string[]
-  dataset_id: string
-  started_at: number
-  completed_at?: number
-  progress: number
-  logs: string[]
-}
 
 interface DashboardState {
   // Connection state
@@ -21,7 +19,7 @@ interface DashboardState {
   lastError: string | null
   lastUpdated: number | null
   retryCount: number
-  
+
   // Data
   workers: Worker[]
   datasets: Dataset[]
@@ -30,13 +28,28 @@ interface DashboardState {
   metrics: SystemMetrics
   logs: LogEntry[]
   tasks: Task[]
-  
+  throughputHistory: ThroughputDataPoint[]
+
+  // UI / Log state
+  logsClearedAt: number | null
+  logsAutoRefresh: boolean
+  selectedDatasetId: string | null
+
   // Actions
   setCoordinatorStatus: (status: Partial<CoordinatorStatus>) => void
   addLog: (entry: Omit<LogEntry, 'id' | 'timestamp'>) => void
   clearLogs: () => void
   setLogs: (logs: LogEntry[]) => void
-  
+  setLogsAutoRefresh: (enabled: boolean) => void
+  refreshLogs: () => Promise<void>
+  setSelectedDatasetId: (datasetId: string | null) => void
+
+  // Mutations
+  registerDataset: (req: RegisterDatasetRequest) => Promise<Dataset>
+  deleteDataset: (id: string) => Promise<void>
+  deregisterWorker: (id: string) => Promise<void>
+  deleteCheckpoint: (id: string) => Promise<void>
+
   // Live mode - fetch from coordinator
   startLiveMode: () => void
   stopLiveMode: () => void
@@ -46,6 +59,13 @@ interface DashboardState {
 let pollingInterval: ReturnType<typeof setInterval> | null = null
 let backoffMs = 2000
 let visibilityHandlerAttached = false
+
+const MAX_THROUGHPUT_POINTS = 60
+
+function filterClearedLogs(logs: LogEntry[], clearedAt: number | null): LogEntry[] {
+  if (clearedAt === null) return logs
+  return logs.filter((log) => log.timestamp > clearedAt)
+}
 
 export const useDashboardStore = create<DashboardState>((set, get) => ({
   // Initial state
@@ -72,6 +92,10 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
   },
   logs: [],
   tasks: [],
+  throughputHistory: [],
+  logsClearedAt: null,
+  logsAutoRefresh: true,
+  selectedDatasetId: null,
 
   setCoordinatorStatus: (status) => {
     set((state) => ({
@@ -90,114 +114,117 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
     }))
   },
 
-  clearLogs: () => set({ logs: [] }),
+  clearLogs: () => set({ logs: [], logsClearedAt: Date.now() }),
 
-  setLogs: (logs) => set({ logs }),
+  setLogs: (logs) =>
+    set((state) => ({
+      logs: filterClearedLogs(logs, state.logsClearedAt),
+    })),
+
+  setLogsAutoRefresh: (enabled) => {
+    set({ logsAutoRefresh: enabled })
+    if (enabled) {
+      void get().refreshLogs()
+    }
+  },
+
+  refreshLogs: async () => {
+    try {
+      const fetched = await api.getLogs({ limit: 500 })
+      const clearedAt = get().logsClearedAt
+      set({ logs: filterClearedLogs(fetched, clearedAt) })
+    } catch (error) {
+      if (import.meta.env.DEV) {
+        console.error('Failed to refresh logs:', error)
+      }
+    }
+  },
+
+  setSelectedDatasetId: (datasetId) => set({ selectedDatasetId: datasetId }),
+
+  registerDataset: async (req) => {
+    const dataset = await api.registerDataset(req)
+    if (dataset.id) {
+      set({ selectedDatasetId: dataset.id })
+    }
+    await get().fetchLiveData()
+    return dataset
+  },
+
+  deleteDataset: async (id) => {
+    await api.deleteDataset(id)
+    if (get().selectedDatasetId === id) {
+      set({ selectedDatasetId: null })
+    }
+    await get().fetchLiveData()
+  },
+
+  deregisterWorker: async (id) => {
+    await api.deregisterWorker(id)
+    await get().fetchLiveData()
+  },
+
+  deleteCheckpoint: async (id) => {
+    await api.deleteCheckpoint(id)
+    await get().fetchLiveData()
+  },
 
   // Live mode - fetch real data from coordinator
   fetchLiveData: async () => {
     try {
-      const data = await api.getDashboardState()
-      
-      // Map API response to our types
-      const workers: Worker[] = data.workers.map(w => ({
-        id: w.id,
-        ip: w.ip,
-        port: w.port,
-        status: w.status as 'active' | 'idle' | 'failed' | 'unknown',
-        gpuCount: w.gpu_count,
-        lastHeartbeat: w.last_heartbeat,
-        assignedShards: w.assigned_shards,
-        currentEpoch: w.current_epoch,
-        currentStep: w.current_step,
-        currentTask: w.current_task,
-      }))
-      
-      const datasets: Dataset[] = data.datasets.map(d => ({
-        id: d.id,
-        name: d.name,
-        totalSamples: d.total_samples,
-        shardSize: d.shard_size,
-        shardCount: d.shard_count,
-        format: d.format,
-        shuffle: d.shuffle,
-        registeredAt: d.registered_at,
-      }))
-      
-      const checkpoints: Checkpoint[] = data.checkpoints.map(c => ({
-        id: c.id,
-        step: c.step,
-        epoch: c.epoch,
-        size: c.size,
-        path: c.path,
-        createdAt: c.created_at,
-        workerId: c.worker_id,
-        status: c.status as 'completed' | 'in_progress' | 'failed',
-      }))
-      
-      const barriers: BarrierStatus[] = data.barriers.map(b => ({
-        id: b.id,
-        name: b.name,
-        arrived: b.arrived,
-        total: b.total,
-        status: b.status as 'waiting' | 'complete',
-        createdAt: b.created_at,
-      }))
-      
-      const metrics: SystemMetrics = {
-        checkpointThroughput: data.metrics.checkpoint_throughput,
-        coordinatorRps: data.metrics.coordinator_rps,
-        activeWorkers: data.metrics.active_workers,
-        totalWorkers: data.metrics.total_workers,
-        barrierLatencyP99: data.metrics.barrier_latency_p99,
-        shardAssignmentTime: data.metrics.shard_assignment_time,
+      const data = await api.getDashboard()
+      const now = Date.now()
+
+      let history = get().throughputHistory
+      if (history.length === 0) {
+        try {
+          const seeded = await api.getMetricsHistory()
+          if (Array.isArray(seeded) && seeded.length > 0) {
+            history = seeded.slice(-MAX_THROUGHPUT_POINTS)
+          }
+        } catch {
+          // Silently ignore if /metrics/history is unavailable
+        }
       }
 
-      const tasks: Task[] = (data.tasks || []).map(t => ({
-        id: t.id,
-        name: t.name,
-        type: t.type,
-        status: t.status,
-        worker_ids: t.worker_ids,
-        dataset_id: t.dataset_id,
-        started_at: t.started_at,
-        completed_at: t.completed_at,
-        progress: t.progress,
-        logs: t.logs,
-      }))
+      const nextPoint: ThroughputDataPoint = {
+        timestamp: now,
+        checkpoints: data.metrics.checkpointThroughput,
+        requests: data.metrics.coordinatorRps,
+      }
+      const updatedHistory = [...history, nextPoint].slice(-MAX_THROUGHPUT_POINTS)
 
-      const systemLogs: LogEntry[] = (data.logs || []).map(l => ({
-        id: l.id,
-        timestamp: l.timestamp,
-        level: l.level,
-        message: l.message,
-        source: l.source,
-        taskId: l.task_id,
-        workerId: l.worker_id,
-      }))
-      
+      const { logsAutoRefresh, logsClearedAt, logs: existingLogs, selectedDatasetId } = get()
+      const nextLogs = logsAutoRefresh
+        ? filterClearedLogs(data.logs, logsClearedAt)
+        : existingLogs
+
+      const nextSelectedDatasetId =
+        selectedDatasetId && data.datasets.some((d) => d.id === selectedDatasetId)
+          ? selectedDatasetId
+          : (data.datasets[0]?.id ?? null)
+
       set({
-        workers,
-        datasets,
-        checkpoints,
-        barriers,
-        metrics,
-        tasks,
-        logs: systemLogs,
+        workers: data.workers,
+        datasets: data.datasets,
+        checkpoints: data.checkpoints,
+        barriers: data.barriers,
+        metrics: data.metrics,
+        tasks: data.tasks,
+        logs: nextLogs,
+        throughputHistory: updatedHistory,
+        selectedDatasetId: nextSelectedDatasetId,
         lastError: null,
-        lastUpdated: Date.now(),
+        lastUpdated: now,
         retryCount: 0,
         coordinator: {
+          ...data.coordinator,
           connected: true,
-          address: data.coordinator.address,
-          uptime: data.coordinator.uptime,
-          version: data.coordinator.version,
         },
       })
       backoffMs = 2000
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to reach coordinator'
-      // Log error for debugging but don't spam console in production
       if (import.meta.env.DEV) {
         console.error('Failed to fetch live data:', error)
       }
@@ -208,11 +235,10 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
         lastError: message,
         coordinator: { ...state.coordinator, connected: false },
       }))
-      // Re-arm polling with backoff (pause when tab hidden)
-      if (pollingInterval && !document.hidden) {
+      if (pollingInterval && typeof document !== 'undefined' && !document.hidden) {
         clearInterval(pollingInterval)
         pollingInterval = setInterval(() => {
-          if (!document.hidden) get().fetchLiveData()
+          if (!document.hidden) void get().fetchLiveData()
         }, backoffMs)
       }
     }
@@ -221,30 +247,32 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
   startLiveMode: () => {
     if (pollingInterval) return
     backoffMs = 2000
-    
-    get().addLog({ level: 'info', message: 'Connecting to coordinator...', source: 'dashboard' })
-    
-    // Fetch immediately
-    get().fetchLiveData()
 
-    if (!visibilityHandlerAttached) {
+    get().addLog({ level: 'info', message: 'Connecting to coordinator...', source: 'dashboard' })
+
+    // Fetch immediately
+    void get().fetchLiveData()
+
+    if (!visibilityHandlerAttached && typeof document !== 'undefined') {
       visibilityHandlerAttached = true
       document.addEventListener('visibilitychange', () => {
         if (document.hidden && pollingInterval) {
           clearInterval(pollingInterval)
           pollingInterval = null
         } else if (!document.hidden && !pollingInterval) {
-          get().fetchLiveData()
+          void get().fetchLiveData()
           pollingInterval = setInterval(() => {
-            if (!document.hidden) get().fetchLiveData()
+            if (!document.hidden) void get().fetchLiveData()
           }, backoffMs)
         }
       })
     }
-    
+
     // Then poll every 2 seconds
     pollingInterval = setInterval(() => {
-      if (!document.hidden) get().fetchLiveData()
+      if (typeof document === 'undefined' || !document.hidden) {
+        void get().fetchLiveData()
+      }
     }, 2000)
   },
 

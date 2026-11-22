@@ -31,13 +31,15 @@ if [ -d "benchmarks/benches" ]; then
     done
     echo ""
     echo "Checking if benchmarks compile..."
-    if cargo check -p benchmarks --benches 2>&1 | grep -q "Finished"; then
+    if cargo check -p benchmarks --benches; then
         echo "  ✅ Benchmarks compile successfully!"
     else
-        echo "  ⚠️  Benchmarks need dependencies to compile"
+        echo "  ❌ Benchmarks failed to compile"
+        exit 1
     fi
 else
     echo "  ❌ benchmarks/benches directory not found"
+    exit 1
 fi
 echo ""
 

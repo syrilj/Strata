@@ -1,392 +1,281 @@
 #!/usr/bin/env python3
 """
-REAL distributed training example with synthetic data.
-This actually trains a model and creates real checkpoints to demonstrate the system.
+Simple real distributed training example with synthetic data, using
+dtruntime.TrainingOrchestrator and dtruntime.CheckpointManager (with pure Python /
+numpy fallback when PyTorch is not installed).
 """
 
+import argparse
 import asyncio
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import numpy as np
 import json
-import time
-import os
-import sys
-from pathlib import Path
-import requests
+import math
+import random
 from datetime import datetime
+from pathlib import Path
 
-class SimpleNN(nn.Module):
-    """Simple neural network for demonstration"""
-    def __init__(self, input_size=784, hidden_size=128, num_classes=10):
-        super(SimpleNN, self).__init__()
-        self.fc1 = nn.Linear(input_size, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.fc3 = nn.Linear(hidden_size, num_classes)
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(0.2)
-        
-    def forward(self, x):
-        x = x.view(x.size(0), -1)  # Flatten
-        x = self.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = self.relu(self.fc2(x))
-        x = self.dropout(x)
-        x = self.fc3(x)
-        return x
+from dtruntime import CheckpointManager, TrainingOrchestrator
+
+try:
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
+
+try:
+    import numpy as np
+
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+
+
+if HAS_TORCH:
+
+    class SimpleNN(nn.Module):
+        def __init__(self, input_size=64, hidden_size=32, num_classes=4):
+            super().__init__()
+            self.fc1 = nn.Linear(input_size, hidden_size)
+            self.fc2 = nn.Linear(hidden_size, num_classes)
+            self.relu = nn.ReLU()
+
+        def forward(self, x):
+            return self.fc2(self.relu(self.fc1(x)))
+
 
 class RealTrainingWorker:
-    def __init__(self, worker_id: str, coordinator_url: str):
+    def __init__(
+        self,
+        worker_id: str,
+        coordinator_url: str,
+        checkpoint_dir: str = "./checkpoints",
+    ):
         self.worker_id = worker_id
         self.coordinator_url = coordinator_url
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model = None
-        self.optimizer = None
-        self.criterion = None
+        self.orchestrator = TrainingOrchestrator(
+            coordinator_url=coordinator_url,
+            worker_id=worker_id,
+        )
+        self.ckpt_dir = Path(checkpoint_dir)
+        self.ckpt_dir.mkdir(parents=True, exist_ok=True)
+        self.checkpoint_manager = CheckpointManager(str(self.ckpt_dir), keep_count=5)
+
         self.current_epoch = 0
         self.current_step = 0
         self.training_loss = []
-        self.training_accuracy = []
-        
-        print(f"🚀 Real Training Worker: {worker_id}")
-        print(f"   Device: {self.device}")
-        print(f"   Coordinator: {coordinator_url}")
-        
-    def generate_synthetic_dataset(self, num_samples=10000):
-        """Generate synthetic dataset for training"""
-        print(f"📊 Generating synthetic dataset with {num_samples} samples...")
-        
-        # Generate synthetic image-like data (28x28 = 784 features)
-        X = torch.randn(num_samples, 784)
-        
-        # Generate synthetic labels (10 classes)
-        y = torch.randint(0, 10, (num_samples,))
-        
-        # Add some pattern to make it learnable
-        # Class 0: mostly negative values
-        # Class 1: mostly positive values, etc.
-        for i in range(10):
-            mask = (y == i)
-            X[mask] = X[mask] + (i - 5) * 0.5  # Shift based on class
-        
-        # Create train/test split
-        train_size = int(0.8 * num_samples)
-        
-        train_X = X[:train_size]
-        train_y = y[:train_size]
-        test_X = X[train_size:]
-        test_y = y[train_size:]
-        
-        # Create data loaders
-        train_dataset = torch.utils.data.TensorDataset(train_X, train_y)
-        test_dataset = torch.utils.data.TensorDataset(test_X, test_y)
-        
-        self.train_loader = torch.utils.data.DataLoader(
-            train_dataset, batch_size=64, shuffle=True
+        self.model = None
+        self.optimizer = None
+        self.criterion = None
+        self.train_loader = None
+        self.test_loader = None
+        self.fallback_data = None
+        self.fallback_weights = None
+
+    def connect(self):
+        cfg = self.orchestrator.register_worker(
+            worker_id=self.worker_id,
+            hostname="127.0.0.1",
+            port=50052,
         )
-        self.test_loader = torch.utils.data.DataLoader(
-            test_dataset, batch_size=64, shuffle=False
+        print(f"[{self.worker_id}] Connected as rank {cfg.rank}/{cfg.world_size}")
+        return cfg
+
+    def generate_synthetic_dataset(self, num_samples: int = 800):
+        self.orchestrator.register_dataset(
+            dataset_id="synthetic-classification",
+            path="./data",
+            total_samples=num_samples,
+            shard_size=200,
+            format="synthetic",
+            shuffle=True,
+            seed=42,
         )
-        
-        print(f"✅ Dataset created: {len(train_dataset)} train, {len(test_dataset)} test samples")
-        
-        # Register with coordinator
-        self.register_dataset_with_coordinator(len(train_dataset))
-        
-    def register_dataset_with_coordinator(self, total_samples):
-        """Register dataset with coordinator via HTTP API"""
-        try:
-            # Try to register via HTTP API
-            dataset_info = {
-                "dataset_id": "synthetic-mnist",
-                "worker_id": self.worker_id,
-                "total_samples": total_samples,
-                "format": "pytorch_tensor",
-                "registered_at": datetime.now().isoformat()
-            }
-            
-            # In a real system, this would be a gRPC call
-            print(f"📋 Dataset registered: {dataset_info['dataset_id']} ({total_samples} samples)")
-            
-        except Exception as e:
-            print(f"⚠️  Dataset registration failed: {e}")
-    
-    def initialize_model(self):
-        """Initialize model, optimizer, and loss function"""
-        print("🧠 Initializing model...")
-        
-        self.model = SimpleNN().to(self.device)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
-        self.criterion = nn.CrossEntropyLoss()
-        
-        # Model info
-        total_params = sum(p.numel() for p in self.model.parameters())
-        print(f"   Parameters: {total_params:,}")
-        
-    async def send_heartbeat(self):
-        """Send heartbeat to coordinator"""
-        try:
-            heartbeat_data = {
-                "worker_id": self.worker_id,
-                "status": "training",
-                "current_epoch": self.current_epoch,
-                "current_step": self.current_step,
-                "current_loss": self.training_loss[-1] if self.training_loss else 0.0,
-                "device": str(self.device),
-                "timestamp": datetime.now().isoformat()
-            }
-            
-            # Try to send to coordinator API
-            try:
-                response = requests.post(
-                    f"{self.coordinator_url.replace('50052', '51052')}/api/heartbeat",
-                    json=heartbeat_data,
-                    timeout=1
-                )
-                if response.status_code == 200:
-                    print(f"💓 Heartbeat sent successfully")
-                else:
-                    print(f"💓 Heartbeat logged (coordinator not responding)")
-            except:
-                # Coordinator not available, just log
-                if self.current_step % 100 == 0:
-                    print(f"💓 Heartbeat: Epoch {self.current_epoch}, Step {self.current_step}")
-                
-        except Exception as e:
-            print(f"⚠️  Heartbeat error: {e}")
-    
-    async def create_real_checkpoint(self, accuracy: float, loss: float):
-        """Create actual model checkpoint"""
-        try:
-            checkpoint_dir = Path("./checkpoints")
-            checkpoint_dir.mkdir(exist_ok=True)
-            
-            checkpoint_path = checkpoint_dir / f"real_checkpoint_worker_{self.worker_id}_epoch_{self.current_epoch}.pt"
-            
-            # Save REAL model state
-            checkpoint_data = {
-                'epoch': self.current_epoch,
-                'step': self.current_step,
-                'model_state_dict': self.model.state_dict(),
-                'optimizer_state_dict': self.optimizer.state_dict(),
-                'loss': loss,
-                'accuracy': accuracy,
-                'worker_id': self.worker_id,
-                'training_loss_history': self.training_loss,
-                'training_accuracy_history': self.training_accuracy,
-                'timestamp': datetime.now().isoformat()
-            }
-            
-            # Actually save the checkpoint
-            torch.save(checkpoint_data, checkpoint_path)
-            
-            # Get real file size
-            file_size = checkpoint_path.stat().st_size
-            
-            print(f"💾 REAL Checkpoint saved: {checkpoint_path.name}")
-            print(f"   Size: {file_size / 1024:.1f} KB")
-            print(f"   Loss: {loss:.4f}, Accuracy: {accuracy:.2f}%")
-            
-            # Notify coordinator
-            await self.notify_coordinator_checkpoint(str(checkpoint_path), file_size, accuracy, loss)
-            
-            return checkpoint_path
-            
-        except Exception as e:
-            print(f"❌ Checkpoint failed: {e}")
-            return None
-    
-    async def notify_coordinator_checkpoint(self, path: str, size: int, accuracy: float, loss: float):
-        """Notify coordinator about new checkpoint"""
-        try:
-            checkpoint_info = {
-                "worker_id": self.worker_id,
-                "checkpoint_id": f"real_checkpoint_epoch_{self.current_epoch}_{int(time.time())}",
-                "epoch": self.current_epoch,
-                "step": self.current_step,
-                "path": path,
-                "size_bytes": size,
-                "accuracy": accuracy,
-                "loss": loss,
-                "timestamp": datetime.now().isoformat()
-            }
-            
-            # Try to notify coordinator
-            try:
-                response = requests.post(
-                    f"{self.coordinator_url.replace('50052', '51052')}/api/checkpoint",
-                    json=checkpoint_info,
-                    timeout=1
-                )
-                print(f"📤 Checkpoint notification sent to coordinator")
-            except:
-                print(f"📤 Checkpoint logged: {checkpoint_info['checkpoint_id']}")
-                
-        except Exception as e:
-            print(f"⚠️  Checkpoint notification failed: {e}")
-    
-    def evaluate_model(self):
-        """Evaluate model on test set"""
-        self.model.eval()
-        correct = 0
-        total = 0
-        total_loss = 0
-        
-        with torch.no_grad():
-            for data, target in self.test_loader:
-                data, target = data.to(self.device), target.to(self.device)
-                output = self.model(data)
-                loss = self.criterion(output, target)
-                total_loss += loss.item()
-                
-                pred = output.argmax(dim=1, keepdim=True)
-                correct += pred.eq(target.view_as(pred)).sum().item()
-                total += target.size(0)
-        
-        accuracy = 100. * correct / total
-        avg_loss = total_loss / len(self.test_loader)
-        
-        return accuracy, avg_loss
-    
+        shard = self.orchestrator.get_shard("synthetic-classification", epoch=0)
+        shard_samples = max(32, shard.end_index - shard.start_index)
+
+        if HAS_TORCH:
+            x = torch.randn(shard_samples, 64)
+            y = torch.randint(0, 4, (shard_samples,))
+            for c in range(4):
+                x[y == c] += (c - 1.5) * 0.6
+            split = int(0.8 * shard_samples)
+            self.train_loader = torch.utils.data.DataLoader(
+                torch.utils.data.TensorDataset(x[:split], y[:split]),
+                batch_size=32,
+                shuffle=True,
+            )
+            self.test_loader = torch.utils.data.DataLoader(
+                torch.utils.data.TensorDataset(x[split:], y[split:]),
+                batch_size=32,
+                shuffle=False,
+            )
+            self.model = SimpleNN()
+            self.optimizer = optim.Adam(self.model.parameters(), lr=0.01)
+            self.criterion = nn.CrossEntropyLoss()
+        elif HAS_NUMPY:
+            rng = np.random.default_rng(42)
+            x = rng.normal(0.0, 1.0, size=(shard_samples, 16))
+            w_true = np.linspace(-1.0, 1.0, 16)
+            y = (x @ w_true > 0).astype(np.float64)
+            self.fallback_data = (x, y)
+            self.fallback_weights = np.zeros(16, dtype=np.float64)
+        else:
+            rng = random.Random(42)
+            x = [[rng.gauss(0.0, 1.0) for _ in range(16)] for _ in range(shard_samples)]
+            w_true = [(-1.0 + 2.0 * i / 15.0) for i in range(16)]
+            y = [1.0 if sum(a * b for a, b in zip(r, w_true)) > 0 else 0.0 for r in x]
+            self.fallback_data = (x, y)
+            self.fallback_weights = [0.0] * 16
+
+    async def save_checkpoint(self, accuracy: float, loss: float):
+        if HAS_TORCH and self.model is not None:
+            import io
+
+            buf = io.BytesIO()
+            torch.save(
+                {
+                    "epoch": self.current_epoch,
+                    "step": self.current_step,
+                    "model_state_dict": self.model.state_dict(),
+                    "accuracy": accuracy,
+                    "loss": loss,
+                },
+                buf,
+            )
+            payload = buf.getvalue()
+        else:
+            weights = (
+                self.fallback_weights.tolist()
+                if HAS_NUMPY and isinstance(self.fallback_weights, np.ndarray)
+                else list(self.fallback_weights)
+            )
+            payload = json.dumps(
+                {
+                    "epoch": self.current_epoch,
+                    "step": self.current_step,
+                    "accuracy": accuracy,
+                    "loss": loss,
+                    "weights": weights,
+                    "timestamp": datetime.now().isoformat(),
+                }
+            ).encode("utf-8")
+
+        ckpt_id = await self.checkpoint_manager.save_async(
+            payload,
+            step=self.current_step,
+            epoch=self.current_epoch,
+            metadata={"worker_id": self.worker_id},
+        )
+        info = self.checkpoint_manager.get_by_step(self.current_step)
+        path = info.path if info is not None else str(self.ckpt_dir / f"{ckpt_id}.ckpt")
+        self.orchestrator.notify_checkpoint(
+            checkpoint_id=ckpt_id,
+            step=self.current_step,
+            epoch=self.current_epoch,
+            storage_path=path,
+            size_bytes=len(payload),
+            checkpoint_type="full",
+        )
+        print(f"[{self.worker_id}] Checkpoint {ckpt_id} saved ({len(payload)} bytes)")
+
     async def train_epoch(self):
-        """Train for one epoch with REAL training"""
-        self.model.train()
-        epoch_loss = 0
-        correct = 0
-        total = 0
-        
-        print(f"🏃 Training Epoch {self.current_epoch + 1}")
-        
-        for batch_idx, (data, target) in enumerate(self.train_loader):
-            data, target = data.to(self.device), target.to(self.device)
-            
-            # Zero gradients
-            self.optimizer.zero_grad()
-            
-            # Forward pass
-            output = self.model(data)
-            loss = self.criterion(output, target)
-            
-            # Backward pass
-            loss.backward()
-            self.optimizer.step()
-            
-            # Statistics
-            epoch_loss += loss.item()
-            pred = output.argmax(dim=1, keepdim=True)
-            correct += pred.eq(target.view_as(pred)).sum().item()
-            total += target.size(0)
-            
-            self.current_step += 1
-            
-            # Send heartbeat every 50 steps
-            if self.current_step % 50 == 0:
-                await self.send_heartbeat()
-            
-            # Print progress every 100 batches
-            if batch_idx % 100 == 0:
-                current_loss = loss.item()
-                current_acc = 100. * correct / total
-                print(f"   Batch {batch_idx:3d}: Loss = {current_loss:.4f}, Acc = {current_acc:.1f}%")
-        
-        # Epoch completed
+        if HAS_TORCH:
+            self.model.train()
+            total_loss = 0.0
+            for data, target in self.train_loader:
+                self.optimizer.zero_grad()
+                loss = self.criterion(self.model(data), target)
+                loss.backward()
+                self.optimizer.step()
+                total_loss += loss.item()
+                self.current_step += 1
+            avg_loss = total_loss / max(1, len(self.train_loader))
+            self.model.eval()
+            correct, total = 0, 0
+            with torch.no_grad():
+                for data, target in self.test_loader:
+                    pred = self.model(data).argmax(dim=1)
+                    correct += (pred == target).sum().item()
+                    total += target.size(0)
+            accuracy = 100.0 * correct / max(1, total)
+        elif HAS_NUMPY:
+            x, y = self.fallback_data
+            logits = np.clip(x @ self.fallback_weights, -20.0, 20.0)
+            probs = 1.0 / (1.0 + np.exp(-logits))
+            grad = (x.T @ (probs - y)) / len(y)
+            self.fallback_weights -= 0.1 * grad
+            self.current_step += len(y) // 32
+            avg_loss = float(
+                -np.mean(y * np.log(probs + 1e-8) + (1.0 - y) * np.log(1.0 - probs + 1e-8))
+            )
+            accuracy = float(((x @ self.fallback_weights > 0) == y).mean() * 100.0)
+        else:
+            x, y = self.fallback_data
+            total_loss = 0.0
+            correct = 0
+            for row, label in zip(x, y):
+                z = max(-20.0, min(20.0, sum(a * b for a, b in zip(row, self.fallback_weights))))
+                prob = 1.0 / (1.0 + math.exp(-z))
+                total_loss += -(label * math.log(prob + 1e-8) + (1.0 - label) * math.log(1.0 - prob + 1e-8))
+                err = prob - label
+                for j in range(len(self.fallback_weights)):
+                    self.fallback_weights[j] -= 0.05 * err * row[j]
+                if (prob >= 0.5) == (label >= 0.5):
+                    correct += 1
+                self.current_step += 1
+            avg_loss = total_loss / max(1, len(y))
+            accuracy = 100.0 * correct / max(1, len(y))
+
         self.current_epoch += 1
-        
-        # Calculate epoch metrics
-        avg_loss = epoch_loss / len(self.train_loader)
-        train_accuracy = 100. * correct / total
-        
-        # Evaluate on test set
-        test_accuracy, test_loss = self.evaluate_model()
-        
-        # Store metrics
         self.training_loss.append(avg_loss)
-        self.training_accuracy.append(train_accuracy)
-        
-        print(f"✅ Epoch {self.current_epoch} Results:")
-        print(f"   Train Loss: {avg_loss:.4f}, Train Acc: {train_accuracy:.2f}%")
-        print(f"   Test Loss: {test_loss:.4f}, Test Acc: {test_accuracy:.2f}%")
-        
-        # Create checkpoint
-        checkpoint_path = await self.create_real_checkpoint(test_accuracy, test_loss)
-        
-        return test_accuracy, test_loss
-    
+        await self.orchestrator.heartbeat_async(
+            current_step=self.current_step,
+            current_epoch=self.current_epoch,
+            state="training",
+            current_task=f"epoch_{self.current_epoch}",
+        )
+        await self.save_checkpoint(accuracy, avg_loss)
+        return accuracy, avg_loss
+
     async def start_real_training(self, num_epochs: int = 3):
-        """Start REAL distributed training"""
-        print("🎯 Starting REAL Distributed Training")
-        print("=" * 50)
-        print("This will:")
-        print("  📊 Generate synthetic dataset")
-        print("  🧠 Train a real neural network")
-        print("  💾 Create actual model checkpoints")
-        print("  📡 Send heartbeats to coordinator")
-        print("  📈 Track real training metrics")
-        print("=" * 50)
-        
         try:
-            # Generate dataset
+            self.connect()
             self.generate_synthetic_dataset()
-            
-            # Initialize model
-            self.initialize_model()
-            
-            # Training loop
-            best_accuracy = 0.0
             for epoch in range(num_epochs):
-                accuracy, loss = await self.train_epoch()
-                
-                if accuracy > best_accuracy:
-                    best_accuracy = accuracy
-                    print(f"🎉 New best accuracy: {best_accuracy:.2f}%")
-                
-                # Simulate barrier synchronization
-                print(f"🚧 Epoch {epoch + 1} barrier synchronization...")
-                await asyncio.sleep(1)
-            
-            print("🎉 REAL Training Completed!")
-            print(f"   Best Test Accuracy: {best_accuracy:.2f}%")
-            print(f"   Total Steps: {self.current_step}")
-            print(f"   Checkpoints Created: {self.current_epoch}")
-            
-            # Show checkpoint files
-            checkpoint_dir = Path("./checkpoints")
-            if checkpoint_dir.exists():
-                checkpoints = list(checkpoint_dir.glob(f"*{self.worker_id}*"))
-                print(f"   Checkpoint Files: {len(checkpoints)}")
-                for cp in checkpoints:
-                    size_kb = cp.stat().st_size / 1024
-                    print(f"     - {cp.name} ({size_kb:.1f} KB)")
-            
-        except KeyboardInterrupt:
-            print("\n🛑 Training interrupted")
-        except Exception as e:
-            print(f"❌ Training failed: {e}")
-            raise
+                acc, loss = await self.train_epoch()
+                print(
+                    f"[{self.worker_id}] Epoch {epoch + 1}/{num_epochs}: "
+                    f"loss={loss:.4f}, acc={acc:.2f}%"
+                )
+                await self.orchestrator.wait_barrier_async(
+                    f"simple-epoch-{epoch}", step=self.current_step
+                )
+            await self.orchestrator.heartbeat_async(
+                current_step=self.current_step,
+                current_epoch=self.current_epoch,
+                state="idle",
+                current_task="complete",
+            )
+        finally:
+            try:
+                self.orchestrator.deregister()
+            except Exception:
+                pass
+
 
 async def main():
-    """Main function"""
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Real Distributed Training Demo")
+    parser = argparse.ArgumentParser(description="Real Distributed Training Simple Demo")
     parser.add_argument("--worker-id", default="real-worker-01", help="Worker ID")
-    parser.add_argument("--coordinator", default="http://localhost:50052", help="Coordinator URL")
+    parser.add_argument("--coordinator", default="http://localhost:50051", help="Coordinator URL")
     parser.add_argument("--epochs", type=int, default=3, help="Number of epochs")
-    
+    parser.add_argument("--checkpoint-dir", default="./checkpoints", help="Checkpoint directory")
     args = parser.parse_args()
-    
-    # Create and run trainer
-    trainer = RealTrainingWorker(args.worker_id, args.coordinator)
-    await trainer.start_real_training(args.epochs)
+
+    worker = RealTrainingWorker(args.worker_id, args.coordinator, args.checkpoint_dir)
+    await worker.start_real_training(args.epochs)
+
 
 if __name__ == "__main__":
-    # Check PyTorch
-    try:
-        import torch
-        print(f"✅ PyTorch {torch.__version__} ready")
-    except ImportError:
-        print("❌ PyTorch required: pip install torch")
-        sys.exit(1)
-    
     asyncio.run(main())

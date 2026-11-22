@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tonic::transport::Channel;
 
 /// Worker configuration returned after registration
@@ -111,30 +111,83 @@ impl BarrierResult {
     }
 }
 
-// Type alias for the gRPC client
+/// Recovery checkpoint info returned by coordinator
+#[pyclass]
+#[derive(Clone)]
+pub struct CoordinatorCheckpointInfo {
+    #[pyo3(get)]
+    pub checkpoint_id: String,
+    #[pyo3(get)]
+    pub step: i64,
+    #[pyo3(get)]
+    pub epoch: i64,
+    #[pyo3(get)]
+    pub storage_path: String,
+    #[pyo3(get)]
+    pub size_bytes: i64,
+    #[pyo3(get)]
+    pub resume_step: i64,
+    #[pyo3(get)]
+    pub resume_epoch: i64,
+}
+
+#[pymethods]
+impl CoordinatorCheckpointInfo {
+    fn __repr__(&self) -> String {
+        format!(
+            "CoordinatorCheckpointInfo(id='{}', step={}, epoch={}, path='{}')",
+            self.checkpoint_id, self.step, self.epoch, self.storage_path
+        )
+    }
+}
+
+// Type alias for the gRPC client (Clone + HTTP/2 multiplexed)
 type Client = CoordinatorClient<Channel>;
+
+pub(crate) fn normalize_coordinator_url(url: &str) -> String {
+    let trimmed = url.trim();
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{}", trimmed)
+    }
+}
+
+fn parse_worker_state(state: &str) -> i32 {
+    match state.trim().to_ascii_lowercase().as_str() {
+        "initializing" | "init" => coordinator::proto::worker_status::State::Initializing as i32,
+        "idle" => coordinator::proto::worker_status::State::Idle as i32,
+        "loading_data" | "loading" => coordinator::proto::worker_status::State::LoadingData as i32,
+        "training" | "active" => coordinator::proto::worker_status::State::Training as i32,
+        "checkpointing" => coordinator::proto::worker_status::State::Checkpointing as i32,
+        "recovering" => coordinator::proto::worker_status::State::Recovering as i32,
+        "error" | "failed" => coordinator::proto::worker_status::State::Error as i32,
+        _ => coordinator::proto::worker_status::State::Training as i32,
+    }
+}
+
+fn parse_checkpoint_type(checkpoint_type: &str) -> i32 {
+    match checkpoint_type.trim().to_ascii_lowercase().as_str() {
+        "incremental" => coordinator::proto::CheckpointType::Incremental as i32,
+        "optimizer" | "optimizer_only" => coordinator::proto::CheckpointType::OptimizerOnly as i32,
+        "model" | "model_only" => coordinator::proto::CheckpointType::ModelOnly as i32,
+        _ => coordinator::proto::CheckpointType::Full as i32,
+    }
+}
 
 /// High-level training orchestrator for distributed training coordination
 ///
 /// Connects to a coordinator gRPC server to manage worker registration,
-/// heartbeats, data sharding, and synchronization barriers.
-///
-/// Example:
-///     orch = TrainingOrchestrator("http://localhost:50051")
-///     config = orch.register_worker("worker-0", "localhost", 50052, gpu_count=8)
-///     print(f"Registered as rank {config.rank} of {config.world_size}")
-///     
-///     # Get data shard for this worker
-///     shard = orch.get_shard("imagenet", epoch=0)
-///     
-///     # Synchronize with other workers
-///     orch.barrier("epoch-0", step=100)
+/// heartbeats, data sharding, checkpoint notifications, and synchronization barriers.
 #[pyclass]
 pub struct TrainingOrchestrator {
-    client: Arc<Mutex<Option<Client>>>,
+    client: Arc<RwLock<Option<Client>>>,
     coordinator_url: String,
     runtime: Arc<Runtime>,
-    worker_id: Arc<Mutex<Option<String>>>,
+    worker_id: Arc<RwLock<Option<String>>>,
+    world_size: Option<i32>,
+    rank: Option<i32>,
+    last_commands: Arc<Mutex<Vec<String>>>,
 }
 
 #[pymethods]
@@ -143,8 +196,17 @@ impl TrainingOrchestrator {
     ///
     /// Args:
     ///     coordinator_url: URL of the coordinator gRPC server (e.g., "http://localhost:50051")
+    ///     worker_id: Optional worker identifier
+    ///     world_size: Optional expected world size
+    ///     rank: Optional worker rank hint
     #[new]
-    fn new(coordinator_url: &str) -> PyResult<Self> {
+    #[pyo3(signature = (coordinator_url, worker_id=None, world_size=None, rank=None))]
+    fn new(
+        coordinator_url: &str,
+        worker_id: Option<String>,
+        world_size: Option<i32>,
+        rank: Option<i32>,
+    ) -> PyResult<Self> {
         let runtime = Runtime::new().map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "Failed to create async runtime: {}",
@@ -153,86 +215,90 @@ impl TrainingOrchestrator {
         })?;
 
         Ok(Self {
-            client: Arc::new(Mutex::new(None)),
-            coordinator_url: coordinator_url.to_string(),
+            client: Arc::new(RwLock::new(None)),
+            coordinator_url: normalize_coordinator_url(coordinator_url),
             runtime: Arc::new(runtime),
-            worker_id: Arc::new(Mutex::new(None)),
+            worker_id: Arc::new(RwLock::new(worker_id)),
+            world_size,
+            rank,
+            last_commands: Arc::new(Mutex::new(Vec::new())),
         })
+    }
+
+    #[getter]
+    fn coordinator_url(&self) -> String {
+        self.coordinator_url.clone()
+    }
+
+    #[getter]
+    fn worker_id(&self) -> Option<String> {
+        self.runtime
+            .block_on(async { self.worker_id.read().await.clone() })
+    }
+
+    #[getter]
+    fn world_size(&self) -> Option<i32> {
+        self.world_size
+    }
+
+    #[getter]
+    fn rank(&self) -> Option<i32> {
+        self.rank
+    }
+
+    #[getter]
+    fn last_commands(&self) -> Vec<String> {
+        self.runtime
+            .block_on(async { self.last_commands.lock().await.clone() })
     }
 
     /// Connect to the coordinator server
     ///
     /// This is called automatically by other methods if not already connected.
     fn connect(&self, py: Python<'_>) -> PyResult<()> {
-        let url = self.coordinator_url.clone();
         let client_lock = self.client.clone();
+        let url = self.coordinator_url.clone();
 
         py.allow_threads(|| {
-            self.runtime.block_on(async move {
-                let channel = Channel::from_shared(url)
-                    .map_err(|e| {
-                        pyo3::exceptions::PyValueError::new_err(format!(
-                            "Invalid coordinator URL: {}",
-                            e
-                        ))
-                    })?
-                    .connect()
-                    .await
-                    .map_err(|e| {
-                        pyo3::exceptions::PyConnectionError::new_err(format!(
-                            "Failed to connect to coordinator: {}",
-                            e
-                        ))
-                    })?;
-
-                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> =
-                    client_lock.lock().await;
-                *guard = Some(CoordinatorClient::new(channel));
-                Ok(())
-            })
+            self.runtime
+                .block_on(Self::get_or_connect_client(client_lock, url))
+                .map(|_| ())
         })
     }
 
     /// Register this worker with the coordinator
-    ///
-    /// Args:
-    ///     worker_id: Unique identifier for this worker
-    ///     hostname: Hostname or IP address
-    ///     port: Port number for worker-to-worker communication
-    ///     gpu_count: Number of GPUs available (default: 0)
-    ///     memory_bytes: Available memory in bytes (default: 0)
-    ///     metadata: Optional metadata dictionary
-    ///
-    /// Returns:
-    ///     WorkerConfig with assigned rank and world size
-    #[pyo3(signature = (worker_id, hostname, port, gpu_count=0, memory_bytes=0, metadata=None))]
+    #[pyo3(signature = (worker_id=None, hostname="127.0.0.1", port=50052, gpu_count=0, memory_bytes=0, ip=None, metadata=None))]
+    #[allow(clippy::too_many_arguments)]
     fn register_worker(
         &self,
         py: Python<'_>,
-        worker_id: &str,
+        worker_id: Option<&str>,
         hostname: &str,
         port: i32,
         gpu_count: i32,
         memory_bytes: i64,
+        ip: Option<&str>,
         metadata: Option<HashMap<String, String>>,
     ) -> PyResult<WorkerConfig> {
-        // Ensure connected
-        self.ensure_connected(py)?;
-
-        let client_lock = self.client.clone();
+        let mut grpc_client = self.get_client_sync(py)?;
+        let wid = match worker_id {
+            Some(id) if !id.is_empty() => id.to_string(),
+            _ => self.get_worker_id_sync(py)?,
+        };
+        let host = ip.unwrap_or(hostname).to_string();
+        let mut meta = metadata.unwrap_or_default();
+        if let Some(ws) = self.world_size {
+            meta.entry("world_size".to_string())
+                .or_insert_with(|| ws.to_string());
+        }
+        if let Some(r) = self.rank {
+            meta.entry("rank".to_string())
+                .or_insert_with(|| r.to_string());
+        }
         let worker_id_store = self.worker_id.clone();
-        let wid = worker_id.to_string();
-        let host = hostname.to_string();
-        let meta = metadata.unwrap_or_default();
 
         py.allow_threads(|| {
             self.runtime.block_on(async move {
-                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> =
-                    client_lock.lock().await;
-                let grpc_client = guard.as_mut().ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err("Not connected to coordinator")
-                })?;
-
                 let request = coordinator::proto::WorkerInfo {
                     worker_id: wid.clone(),
                     hostname: host,
@@ -250,12 +316,15 @@ impl TrainingOrchestrator {
                 })?;
 
                 let config = response.into_inner();
-
-                // Store worker ID for future calls
-                *worker_id_store.lock().await = Some(wid);
+                let assigned = if config.assigned_id.is_empty() {
+                    wid
+                } else {
+                    config.assigned_id.clone()
+                };
+                *worker_id_store.write().await = Some(assigned.clone());
 
                 Ok(WorkerConfig {
-                    worker_id: config.assigned_id,
+                    worker_id: assigned,
                     rank: config.rank,
                     world_size: config.world_size,
                     heartbeat_interval_ms: config.heartbeat_interval_ms,
@@ -264,62 +333,238 @@ impl TrainingOrchestrator {
         })
     }
 
-    /// Send a heartbeat to the coordinator
-    ///
-    /// Args:
-    ///     current_step: Current training step (default: 0)
-    ///     current_epoch: Current training epoch (default: 0)
-    ///
-    /// Returns:
-    ///     True if acknowledged
-    #[pyo3(signature = (current_step=0, current_epoch=0))]
-    fn heartbeat(&self, py: Python<'_>, current_step: i64, current_epoch: i64) -> PyResult<bool> {
-        self.ensure_connected(py)?;
-
+    /// Async version of register_worker
+    #[pyo3(signature = (worker_id=None, hostname="127.0.0.1", port=50052, gpu_count=0, memory_bytes=0, ip=None, metadata=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn register_worker_async<'py>(
+        &self,
+        py: Python<'py>,
+        worker_id: Option<String>,
+        hostname: &str,
+        port: i32,
+        gpu_count: i32,
+        memory_bytes: i64,
+        ip: Option<String>,
+        metadata: Option<HashMap<String, String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let client_lock = self.client.clone();
-        let worker_id = self.get_worker_id(py)?;
+        let url = self.coordinator_url.clone();
+        let worker_id_store = self.worker_id.clone();
+        let host = ip.unwrap_or_else(|| hostname.to_string());
+        let mut meta = metadata.unwrap_or_default();
+        if let Some(ws) = self.world_size {
+            meta.entry("world_size".to_string())
+                .or_insert_with(|| ws.to_string());
+        }
+        if let Some(r) = self.rank {
+            meta.entry("rank".to_string())
+                .or_insert_with(|| r.to_string());
+        }
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut grpc_client = Self::get_or_connect_client(client_lock, url).await?;
+            let wid = match worker_id {
+                Some(id) if !id.is_empty() => id,
+                _ => {
+                    let guard = worker_id_store.read().await;
+                    guard.clone().ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "Worker ID not provided and not set on orchestrator.",
+                        )
+                    })?
+                }
+            };
+
+            let request = coordinator::proto::WorkerInfo {
+                worker_id: wid.clone(),
+                hostname: host,
+                port,
+                gpu_count,
+                memory_bytes,
+                metadata: meta,
+            };
+
+            let response = grpc_client.register_worker(request).await.map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to register worker: {}",
+                    e
+                ))
+            })?;
+
+            let config = response.into_inner();
+            let assigned = if config.assigned_id.is_empty() {
+                wid
+            } else {
+                config.assigned_id.clone()
+            };
+            *worker_id_store.write().await = Some(assigned.clone());
+
+            Ok(WorkerConfig {
+                worker_id: assigned,
+                rank: config.rank,
+                world_size: config.world_size,
+                heartbeat_interval_ms: config.heartbeat_interval_ms,
+            })
+        })
+    }
+
+    /// Send a heartbeat to the coordinator
+    #[pyo3(signature = (current_step=0, current_epoch=0, state="training", current_task="", cpu_percent=0.0, memory_used_bytes=0))]
+    #[allow(clippy::too_many_arguments)]
+    fn heartbeat(
+        &self,
+        py: Python<'_>,
+        current_step: i64,
+        current_epoch: i64,
+        state: &str,
+        current_task: &str,
+        cpu_percent: f64,
+        memory_used_bytes: i64,
+    ) -> PyResult<bool> {
+        let (ack, _) = self.heartbeat_with_commands(
+            py,
+            current_step,
+            current_epoch,
+            state,
+            current_task,
+            cpu_percent,
+            memory_used_bytes,
+        )?;
+        Ok(ack)
+    }
+
+    /// Send a heartbeat and return (acknowledged, pending_commands)
+    #[pyo3(signature = (current_step=0, current_epoch=0, state="training", current_task="", cpu_percent=0.0, memory_used_bytes=0))]
+    #[allow(clippy::too_many_arguments)]
+    fn heartbeat_with_commands(
+        &self,
+        py: Python<'_>,
+        current_step: i64,
+        current_epoch: i64,
+        state: &str,
+        current_task: &str,
+        cpu_percent: f64,
+        memory_used_bytes: i64,
+    ) -> PyResult<(bool, Vec<String>)> {
+        let mut grpc_client = self.get_client_sync(py)?;
+        let worker_id = self.get_worker_id_sync(py)?;
+        let state_enum = parse_worker_state(state);
+        let task = current_task.to_string();
+        let last_commands = self.last_commands.clone();
 
         py.allow_threads(|| {
             self.runtime.block_on(async move {
-                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> =
-                    client_lock.lock().await;
-                let grpc_client = guard.as_mut().ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err("Not connected to coordinator")
-                })?;
-
                 let status = coordinator::proto::WorkerStatus {
-                    state: coordinator::proto::worker_status::State::Training as i32,
+                    state: state_enum,
                     current_step,
                     current_epoch,
-                    current_task: String::new(),
+                    current_task: task,
+                };
+
+                let resources = if cpu_percent > 0.0 || memory_used_bytes > 0 {
+                    Some(coordinator::proto::ResourceUsage {
+                        cpu_percent,
+                        memory_used_bytes,
+                        gpu_usage: vec![],
+                        disk_read_bytes: 0,
+                        disk_write_bytes: 0,
+                        network_rx_bytes: 0,
+                        network_tx_bytes: 0,
+                    })
+                } else {
+                    None
                 };
 
                 let request = coordinator::proto::HeartbeatRequest {
                     worker_id,
                     timestamp_ms: chrono::Utc::now().timestamp_millis(),
                     status: Some(status),
-                    resources: None,
+                    resources,
                 };
 
                 let response = grpc_client.heartbeat(request).await.map_err(|e| {
                     pyo3::exceptions::PyRuntimeError::new_err(format!("Heartbeat failed: {}", e))
                 })?;
 
-                Ok(response.into_inner().acknowledged)
+                let inner = response.into_inner();
+                *last_commands.lock().await = inner.pending_commands.clone();
+                Ok((inner.acknowledged, inner.pending_commands))
             })
         })
     }
 
+    /// Async version of heartbeat
+    #[pyo3(signature = (current_step=0, current_epoch=0, state="training", current_task="", cpu_percent=0.0, memory_used_bytes=0))]
+    #[allow(clippy::too_many_arguments)]
+    fn heartbeat_async<'py>(
+        &self,
+        py: Python<'py>,
+        current_step: i64,
+        current_epoch: i64,
+        state: &str,
+        current_task: &str,
+        cpu_percent: f64,
+        memory_used_bytes: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client_lock = self.client.clone();
+        let url = self.coordinator_url.clone();
+        let worker_id_store = self.worker_id.clone();
+        let state_enum = parse_worker_state(state);
+        let task = current_task.to_string();
+        let last_commands = self.last_commands.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut grpc_client = Self::get_or_connect_client(client_lock, url).await?;
+            let worker_id = {
+                let guard = worker_id_store.read().await;
+                guard.clone().ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "Worker not registered. Call register_worker() first.",
+                    )
+                })?
+            };
+
+            let status = coordinator::proto::WorkerStatus {
+                state: state_enum,
+                current_step,
+                current_epoch,
+                current_task: task,
+            };
+
+            let resources = if cpu_percent > 0.0 || memory_used_bytes > 0 {
+                Some(coordinator::proto::ResourceUsage {
+                    cpu_percent,
+                    memory_used_bytes,
+                    gpu_usage: vec![],
+                    disk_read_bytes: 0,
+                    disk_write_bytes: 0,
+                    network_rx_bytes: 0,
+                    network_tx_bytes: 0,
+                })
+            } else {
+                None
+            };
+
+            let request = coordinator::proto::HeartbeatRequest {
+                worker_id,
+                timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                status: Some(status),
+                resources,
+            };
+
+            let response = grpc_client.heartbeat(request).await.map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Heartbeat failed: {}", e))
+            })?;
+
+            let inner = response.into_inner();
+            *last_commands.lock().await = inner.pending_commands.clone();
+            Ok(inner.acknowledged)
+        })
+    }
+
     /// Register a dataset with the coordinator
-    ///
-    /// Args:
-    ///     dataset_id: Unique dataset identifier
-    ///     path: Path to the dataset
-    ///     total_samples: Total number of samples
-    ///     shard_size: Samples per shard
-    ///     shuffle: Whether to shuffle (default: True)
-    ///     seed: Random seed (default: 42)
-    #[pyo3(signature = (dataset_id, path, total_samples, shard_size, shuffle=true, seed=42))]
+    #[pyo3(signature = (dataset_id, path, total_samples, shard_size, format="parquet", shuffle=true, seed=42))]
+    #[allow(clippy::too_many_arguments)]
     fn register_dataset(
         &self,
         py: Python<'_>,
@@ -327,27 +572,21 @@ impl TrainingOrchestrator {
         path: &str,
         total_samples: i64,
         shard_size: i64,
+        format: &str,
         shuffle: bool,
         seed: i64,
-    ) -> PyResult<i64> {
-        self.ensure_connected(py)?;
-
-        let client_lock = self.client.clone();
+    ) -> PyResult<bool> {
+        let mut grpc_client = self.get_client_sync(py)?;
         let did = dataset_id.to_string();
         let p = path.to_string();
+        let fmt = format.to_string();
 
         py.allow_threads(|| {
             self.runtime.block_on(async move {
-                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> =
-                    client_lock.lock().await;
-                let grpc_client = guard.as_mut().ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err("Not connected to coordinator")
-                })?;
-
                 let request = coordinator::proto::DatasetInfo {
                     dataset_id: did,
                     path: p,
-                    format: "auto".to_string(),
+                    format: fmt,
                     total_samples,
                     shard_size,
                     shuffle,
@@ -362,39 +601,25 @@ impl TrainingOrchestrator {
                     ))
                 })?;
 
-                Ok(response.into_inner().total_shards)
+                Ok(response.into_inner().success)
             })
         })
     }
 
     /// Get shard assignment for this worker
-    ///
-    /// Args:
-    ///     dataset_id: Dataset identifier
-    ///     epoch: Training epoch
-    ///
-    /// Returns:
-    ///     CoordinatorShardInfo with shard assignment details
+    #[pyo3(signature = (dataset_id, epoch=0))]
     fn get_shard(
         &self,
         py: Python<'_>,
         dataset_id: &str,
         epoch: i64,
     ) -> PyResult<CoordinatorShardInfo> {
-        self.ensure_connected(py)?;
-
-        let client_lock = self.client.clone();
-        let worker_id = self.get_worker_id(py)?;
+        let mut grpc_client = self.get_client_sync(py)?;
+        let worker_id = self.get_worker_id_sync(py)?;
         let did = dataset_id.to_string();
 
         py.allow_threads(|| {
             self.runtime.block_on(async move {
-                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> =
-                    client_lock.lock().await;
-                let grpc_client = guard.as_mut().ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err("Not connected to coordinator")
-                })?;
-
                 let request = coordinator::proto::ShardRequest {
                     worker_id,
                     dataset_id: did,
@@ -419,29 +644,110 @@ impl TrainingOrchestrator {
         })
     }
 
-    /// Wait at a synchronization barrier
-    ///
-    /// Args:
-    ///     barrier_id: Unique barrier identifier
-    ///     step: Training step for this barrier
-    ///
-    /// Returns:
-    ///     BarrierResult with synchronization details
-    fn barrier(&self, py: Python<'_>, barrier_id: &str, step: i64) -> PyResult<BarrierResult> {
-        self.ensure_connected(py)?;
+    /// Notify coordinator about a saved checkpoint
+    #[pyo3(signature = (checkpoint_id, step, epoch, storage_path, size_bytes, checkpoint_type="full", metadata=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn notify_checkpoint(
+        &self,
+        py: Python<'_>,
+        checkpoint_id: &str,
+        step: i64,
+        epoch: i64,
+        storage_path: &str,
+        size_bytes: i64,
+        checkpoint_type: &str,
+        metadata: Option<HashMap<String, String>>,
+    ) -> PyResult<bool> {
+        let mut grpc_client = self.get_client_sync(py)?;
+        let worker_id = self.get_worker_id_sync(py)?;
+        let ckpt_id = checkpoint_id.to_string();
+        let path = storage_path.to_string();
+        let ckpt_type = parse_checkpoint_type(checkpoint_type);
+        let meta = metadata.unwrap_or_default();
 
-        let client_lock = self.client.clone();
-        let worker_id = self.get_worker_id(py)?;
+        py.allow_threads(|| {
+            self.runtime.block_on(async move {
+                let request = coordinator::proto::CheckpointInfo {
+                    worker_id,
+                    checkpoint_id: ckpt_id,
+                    step,
+                    epoch,
+                    storage_path: path,
+                    size_bytes,
+                    timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                    r#type: ckpt_type,
+                    metadata: meta,
+                };
+
+                let response = grpc_client.notify_checkpoint(request).await.map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Failed to notify checkpoint: {}",
+                        e
+                    ))
+                })?;
+
+                Ok(response.into_inner().success)
+            })
+        })
+    }
+
+    /// Get the latest checkpoint from the coordinator for recovery
+    #[pyo3(signature = (job_id=""))]
+    fn get_latest_checkpoint(
+        &self,
+        py: Python<'_>,
+        job_id: &str,
+    ) -> PyResult<Option<CoordinatorCheckpointInfo>> {
+        let mut grpc_client = self.get_client_sync(py)?;
+        let worker_id = self.get_worker_id_sync(py).unwrap_or_default();
+        let jid = job_id.to_string();
+
+        py.allow_threads(|| {
+            self.runtime.block_on(async move {
+                let request = coordinator::proto::RecoveryRequest {
+                    worker_id,
+                    job_id: jid,
+                };
+
+                let response = grpc_client
+                    .get_latest_checkpoint(request)
+                    .await
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "Failed to get latest checkpoint: {}",
+                            e
+                        ))
+                    })?;
+
+                let resp = response.into_inner();
+                if !resp.has_checkpoint {
+                    return Ok(None);
+                }
+
+                Ok(resp
+                    .latest_checkpoint
+                    .map(|ckpt| CoordinatorCheckpointInfo {
+                        checkpoint_id: ckpt.checkpoint_id,
+                        step: ckpt.step,
+                        epoch: ckpt.epoch,
+                        storage_path: ckpt.storage_path,
+                        size_bytes: ckpt.size_bytes,
+                        resume_step: resp.resume_step,
+                        resume_epoch: resp.resume_epoch,
+                    }))
+            })
+        })
+    }
+
+    /// Wait at a synchronization barrier
+    #[pyo3(signature = (barrier_id, step=0))]
+    fn barrier(&self, py: Python<'_>, barrier_id: &str, step: i64) -> PyResult<BarrierResult> {
+        let mut grpc_client = self.get_client_sync(py)?;
+        let worker_id = self.get_worker_id_sync(py)?;
         let bid = barrier_id.to_string();
 
         py.allow_threads(|| {
             self.runtime.block_on(async move {
-                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> =
-                    client_lock.lock().await;
-                let grpc_client = guard.as_mut().ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err("Not connected to coordinator")
-                })?;
-
                 let request = coordinator::proto::BarrierRequest {
                     worker_id,
                     barrier_id: bid,
@@ -462,21 +768,62 @@ impl TrainingOrchestrator {
         })
     }
 
+    /// Alias for barrier() matching async/sync caller expectations
+    #[pyo3(signature = (barrier_id, step=0))]
+    fn wait_barrier(&self, py: Python<'_>, barrier_id: &str, step: i64) -> PyResult<BarrierResult> {
+        self.barrier(py, barrier_id, step)
+    }
+
+    /// Async version of wait_barrier
+    #[pyo3(signature = (barrier_id, step=0))]
+    fn wait_barrier_async<'py>(
+        &self,
+        py: Python<'py>,
+        barrier_id: &str,
+        step: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client_lock = self.client.clone();
+        let url = self.coordinator_url.clone();
+        let worker_id_store = self.worker_id.clone();
+        let bid = barrier_id.to_string();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut grpc_client = Self::get_or_connect_client(client_lock, url).await?;
+            let worker_id = {
+                let guard = worker_id_store.read().await;
+                guard.clone().ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "Worker not registered. Call register_worker() first.",
+                    )
+                })?
+            };
+
+            let request = coordinator::proto::BarrierRequest {
+                worker_id,
+                barrier_id: bid,
+                step,
+            };
+
+            let response = grpc_client.wait_barrier(request).await.map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Barrier failed: {}", e))
+            })?;
+
+            let result = response.into_inner();
+            Ok(BarrierResult {
+                released: result.released,
+                participants: result.participants,
+                arrival_order: result.arrival_order,
+            })
+        })
+    }
+
     /// Deregister this worker from the coordinator
     fn deregister(&self, py: Python<'_>) -> PyResult<()> {
-        self.ensure_connected(py)?;
-
-        let client_lock = self.client.clone();
-        let worker_id = self.get_worker_id(py)?;
+        let mut grpc_client = self.get_client_sync(py)?;
+        let worker_id = self.get_worker_id_sync(py)?;
 
         py.allow_threads(|| {
             self.runtime.block_on(async move {
-                let mut guard: tokio::sync::MutexGuard<'_, Option<Client>> =
-                    client_lock.lock().await;
-                let grpc_client = guard.as_mut().ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err("Not connected to coordinator")
-                })?;
-
                 let request = coordinator::proto::WorkerInfo {
                     worker_id,
                     hostname: String::new(),
@@ -504,24 +851,53 @@ impl TrainingOrchestrator {
 }
 
 impl TrainingOrchestrator {
-    fn ensure_connected(&self, py: Python<'_>) -> PyResult<()> {
-        let client_lock = self.client.clone();
-        let is_connected = self.runtime.block_on(async {
-            let guard: tokio::sync::MutexGuard<'_, Option<Client>> = client_lock.lock().await;
-            guard.is_some()
-        });
-
-        if !is_connected {
-            self.connect(py)?;
+    async fn get_or_connect_client(
+        client_lock: Arc<RwLock<Option<Client>>>,
+        url: String,
+    ) -> PyResult<Client> {
+        {
+            let guard = client_lock.read().await;
+            if let Some(client) = guard.as_ref() {
+                return Ok(client.clone());
+            }
         }
-        Ok(())
+
+        let channel = Channel::from_shared(url)
+            .map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("Invalid coordinator URL: {}", e))
+            })?
+            .connect()
+            .await
+            .map_err(|e| {
+                pyo3::exceptions::PyConnectionError::new_err(format!(
+                    "Failed to connect to coordinator: {}",
+                    e
+                ))
+            })?;
+
+        let new_client = CoordinatorClient::new(channel);
+        let mut guard = client_lock.write().await;
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+        *guard = Some(new_client.clone());
+        Ok(new_client)
     }
 
-    fn get_worker_id(&self, py: Python<'_>) -> PyResult<String> {
+    fn get_client_sync(&self, py: Python<'_>) -> PyResult<Client> {
+        let client_lock = self.client.clone();
+        let url = self.coordinator_url.clone();
+        py.allow_threads(|| {
+            self.runtime
+                .block_on(Self::get_or_connect_client(client_lock, url))
+        })
+    }
+
+    fn get_worker_id_sync(&self, py: Python<'_>) -> PyResult<String> {
         let worker_id = self.worker_id.clone();
         py.allow_threads(|| {
             self.runtime.block_on(async {
-                let guard = worker_id.lock().await;
+                let guard = worker_id.read().await;
                 guard.clone().ok_or_else(|| {
                     pyo3::exceptions::PyRuntimeError::new_err(
                         "Worker not registered. Call register_worker() first.",

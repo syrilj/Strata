@@ -5,7 +5,10 @@
 use crate::{ConsistentHash, EpochCoordinator};
 use dashmap::DashMap;
 use runtime_core::types::{DatasetId, DatasetMetadata, Epoch, ShardAssignment, ShardId, WorkerId};
+use runtime_core::{Error, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 /// Shard manager for coordinating data distribution
@@ -72,8 +75,20 @@ impl ShardManager {
         }
     }
 
-    /// Register a new dataset
-    pub fn register_dataset(&self, metadata: DatasetMetadata) {
+    /// Register a new dataset.
+    ///
+    /// Note: if `metadata.shard_size == 0`, it is clamped to `1` and `total_shards` is recomputed
+    /// to avoid division-by-zero panics. Use [`Self::register_dataset_with_info`] or
+    /// [`Self::try_register_dataset`] for strict `Result` error reporting.
+    pub fn register_dataset(&self, mut metadata: DatasetMetadata) {
+        if metadata.shard_size == 0 {
+            tracing::warn!(
+                dataset = %metadata.id,
+                "Dataset registered with shard_size=0; clamping to 1"
+            );
+            metadata.shard_size = 1;
+            metadata.total_shards = metadata.total_samples.div_ceil(1);
+        }
         let dataset_id = metadata.id.clone();
         self.epoch_coordinator.init_epoch(&dataset_id, 0);
         self.datasets.insert(dataset_id.clone(), metadata);
@@ -81,7 +96,30 @@ impl ShardManager {
         tracing::info!(dataset = %dataset_id, "Registered dataset");
     }
 
-    /// Register a dataset with explicit parameters
+    /// Register a dataset with validation (`shard_size > 0`)
+    pub fn try_register_dataset(&self, metadata: DatasetMetadata) -> Result<DatasetMetadata> {
+        if metadata.shard_size == 0 {
+            return Err(Error::InvalidShardConfig {
+                message: format!(
+                    "shard_size must be greater than 0 for dataset '{}'",
+                    metadata.id
+                ),
+            });
+        }
+        let mut normalized = metadata;
+        normalized.total_shards = normalized.total_samples.div_ceil(normalized.shard_size);
+        let dataset_id = normalized.id.clone();
+        self.epoch_coordinator.init_epoch(&dataset_id, 0);
+        self.datasets.insert(dataset_id.clone(), normalized.clone());
+
+        tracing::info!(dataset = %dataset_id, "Registered dataset");
+        Ok(normalized)
+    }
+
+    /// Register a dataset with explicit parameters.
+    ///
+    /// Note: if `shard_size == 0`, logs a warning and clamps to `1` to remain infallible.
+    /// For strict validation returning `Err`, use [`Self::register_dataset_with_info`].
     pub fn register_dataset_params(
         &self,
         dataset_id: &str,
@@ -90,7 +128,16 @@ impl ShardManager {
         shuffle: bool,
         seed: u64,
     ) {
-        let total_shards = total_samples.div_ceil(shard_size);
+        let effective_shard_size = if shard_size == 0 {
+            tracing::warn!(
+                dataset = %dataset_id,
+                "register_dataset_params called with shard_size=0; clamping to 1"
+            );
+            1
+        } else {
+            shard_size
+        };
+        let total_shards = total_samples.div_ceil(effective_shard_size);
 
         let metadata = DatasetMetadata {
             id: dataset_id.to_string(),
@@ -98,13 +145,68 @@ impl ShardManager {
             format: "unknown".to_string(),
             total_samples,
             total_shards,
-            shard_size,
+            shard_size: effective_shard_size,
             shuffle,
             seed,
             metadata: Default::default(),
         };
 
         self.register_dataset(metadata);
+    }
+
+    /// Register a dataset with full path, format, and metadata, validating `shard_size > 0`
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_dataset_with_info(
+        &self,
+        dataset_id: String,
+        path: String,
+        format: String,
+        total_samples: u64,
+        shard_size: u64,
+        shuffle: bool,
+        seed: u64,
+        metadata: HashMap<String, String>,
+    ) -> Result<DatasetMetadata> {
+        if shard_size == 0 {
+            return Err(Error::InvalidShardConfig {
+                message: format!(
+                    "shard_size must be greater than 0 for dataset '{}'",
+                    dataset_id
+                ),
+            });
+        }
+
+        let total_shards = total_samples.div_ceil(shard_size);
+        let dataset = DatasetMetadata {
+            id: dataset_id.clone(),
+            path,
+            format,
+            total_samples,
+            total_shards,
+            shard_size,
+            shuffle,
+            seed,
+            metadata,
+        };
+
+        self.epoch_coordinator.init_epoch(&dataset_id, 0);
+        self.datasets.insert(dataset_id.clone(), dataset.clone());
+
+        tracing::info!(dataset = %dataset_id, total_shards = total_shards, "Registered dataset with info");
+        Ok(dataset)
+    }
+
+    /// Remove a registered dataset and clear its shard assignments from workers
+    pub fn remove_dataset(&self, dataset_id: &str) -> bool {
+        let removed = self.datasets.remove(dataset_id).is_some();
+        if removed {
+            self.epoch_coordinator.clear_cache(dataset_id);
+            for worker in self.active_workers.iter() {
+                worker.assigned_shards.remove(dataset_id);
+            }
+            tracing::info!(dataset = %dataset_id, "Removed dataset");
+        }
+        removed
     }
 
     /// Get dataset metadata
@@ -160,6 +262,54 @@ impl ShardManager {
         }
     }
 
+    /// Collect sorted file paths from a dataset path if it points to an existing local file or directory
+    fn collect_local_files(dataset_path: &str) -> Vec<String> {
+        if dataset_path.is_empty() {
+            return Vec::new();
+        }
+        let path = Path::new(dataset_path);
+        if path.is_file() {
+            return vec![dataset_path.to_string()];
+        }
+        if path.is_dir() {
+            let Ok(entries) = std::fs::read_dir(path) else {
+                return Vec::new();
+            };
+            let mut files: Vec<String> = entries
+                .flatten()
+                .filter_map(|entry| {
+                    let p = entry.path();
+                    if p.is_file() {
+                        Some(p.to_string_lossy().to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            files.sort();
+            return files;
+        }
+        Vec::new()
+    }
+
+    /// Deterministically slice dataset files for a given shard
+    fn files_for_shard(files: &[String], shard_id: u64, total_shards: u64) -> Vec<String> {
+        if files.is_empty() || total_shards == 0 {
+            return Vec::new();
+        }
+        let n = files.len();
+        let shard = shard_id as usize;
+        let total = total_shards as usize;
+        if n >= total {
+            let start = shard * n / total;
+            let end = (shard + 1) * n / total;
+            files[start..end].to_vec()
+        } else {
+            // Fewer files than shards: assign deterministically modulo file count
+            vec![files[shard % n].clone()]
+        }
+    }
+
     /// Get shard assignment for a worker for a specific epoch
     pub fn get_shard_for_worker(
         &self,
@@ -190,12 +340,16 @@ impl ShardManager {
                 .get_shards_for_node(worker_id, dataset_id, dataset.total_shards)
         };
 
+        let local_files = Self::collect_local_files(&dataset.path);
+
         let assignments: Vec<_> = shard_ids
             .into_iter()
             .map(|shard_id| {
                 let start_index = shard_id * dataset.shard_size;
                 let end_index =
                     std::cmp::min(start_index + dataset.shard_size, dataset.total_samples);
+                let file_paths =
+                    Self::files_for_shard(&local_files, shard_id, dataset.total_shards);
 
                 ShardAssignment {
                     dataset_id: dataset_id.to_string(),
@@ -203,7 +357,7 @@ impl ShardManager {
                     total_shards: dataset.total_shards,
                     start_index,
                     end_index,
-                    file_paths: vec![], // Populated by storage layer
+                    file_paths,
                     epoch,
                 }
             })
@@ -218,6 +372,86 @@ impl ShardManager {
         }
 
         Some(assignments)
+    }
+
+    /// Count total shards currently assigned to a worker across all registered datasets
+    pub fn get_worker_shard_count(&self, worker_id: &str) -> usize {
+        let Some(worker) = self.active_workers.get(worker_id) else {
+            return 0;
+        };
+        worker
+            .assigned_shards
+            .iter()
+            .map(|entry| entry.value().len())
+            .sum()
+    }
+
+    /// List all shards of a dataset for a given epoch along with the worker currently assigned to each shard (if any)
+    pub fn list_dataset_shards(
+        &self,
+        dataset_id: &str,
+        epoch: Epoch,
+    ) -> Vec<(ShardAssignment, Option<WorkerId>)> {
+        let Some(dataset) = self.get_dataset(dataset_id) else {
+            return Vec::new();
+        };
+
+        let total_workers = self.active_workers.len() as u32;
+        let local_files = Self::collect_local_files(&dataset.path);
+
+        // Build shard_id -> worker_id lookup
+        let mut shard_owners: HashMap<ShardId, WorkerId> = HashMap::new();
+        if total_workers > 0 {
+            if dataset.shuffle {
+                // Collect active workers sorted by rank
+                let mut ranked_workers: Vec<(u32, WorkerId)> = self
+                    .worker_ranks
+                    .iter()
+                    .map(|e| (*e.value(), e.key().clone()))
+                    .collect();
+                ranked_workers.sort_by_key(|(rank, _)| *rank);
+
+                for (rank, worker_id) in ranked_workers {
+                    let shard_ids = self.epoch_coordinator.get_worker_shards(
+                        dataset_id,
+                        epoch,
+                        dataset.total_shards,
+                        rank,
+                        total_workers,
+                    );
+                    for sid in shard_ids {
+                        shard_owners.insert(sid, worker_id.clone());
+                    }
+                }
+            } else {
+                for shard_id in 0..dataset.total_shards {
+                    if let Some(owner) = self.hash_ring.get_node_for_shard(dataset_id, shard_id) {
+                        shard_owners.insert(shard_id, owner);
+                    }
+                }
+            }
+        }
+
+        (0..dataset.total_shards)
+            .map(|shard_id| {
+                let start_index = shard_id * dataset.shard_size;
+                let end_index =
+                    std::cmp::min(start_index + dataset.shard_size, dataset.total_samples);
+                let file_paths =
+                    Self::files_for_shard(&local_files, shard_id, dataset.total_shards);
+                let assignment = ShardAssignment {
+                    dataset_id: dataset_id.to_string(),
+                    shard_id,
+                    total_shards: dataset.total_shards,
+                    start_index,
+                    end_index,
+                    file_paths,
+                    epoch,
+                };
+                let owner = shard_owners.get(&shard_id).cloned();
+                (assignment, owner)
+            })
+            .collect()
     }
 
     /// Rebalance shards when workers change
@@ -528,5 +762,105 @@ mod tests {
             assert!(shard.end_index <= 1050);
             assert!(shard.start_index < shard.end_index);
         }
+    }
+
+    #[test]
+    fn test_shard_size_zero_validation() {
+        let manager = ShardManager::new();
+
+        let err = manager
+            .register_dataset_with_info(
+                "bad-ds".to_string(),
+                String::new(),
+                "parquet".to_string(),
+                100,
+                0,
+                false,
+                42,
+                HashMap::new(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidShardConfig { .. }));
+
+        // Infallible register_dataset_params clamps shard_size=0 to 1 instead of panicking
+        manager.register_dataset_params("clamped-ds", 10, 0, false, 1);
+        let ds = manager.get_dataset("clamped-ds").unwrap();
+        assert_eq!(ds.shard_size, 1);
+        assert_eq!(ds.total_shards, 10);
+    }
+
+    #[test]
+    fn test_register_with_info_remove_counts_and_list_shards() {
+        let manager = ShardManager::new();
+        manager.register_worker("worker-a");
+        manager.register_worker("worker-b");
+
+        let mut meta = HashMap::new();
+        meta.insert("split".to_string(), "train".to_string());
+
+        let ds = manager
+            .register_dataset_with_info(
+                "ds-1".to_string(),
+                "/nonexistent/path".to_string(),
+                "webdataset".to_string(),
+                400,
+                100,
+                true,
+                7,
+                meta,
+            )
+            .unwrap();
+        assert_eq!(ds.format, "webdataset");
+        assert_eq!(ds.path, "/nonexistent/path");
+        assert_eq!(ds.total_shards, 4);
+
+        let a_shards = manager.get_shard_for_worker("ds-1", "worker-a", 0).unwrap();
+        let b_shards = manager.get_shard_for_worker("ds-1", "worker-b", 0).unwrap();
+        assert_eq!(manager.get_worker_shard_count("worker-a"), a_shards.len());
+        assert_eq!(manager.get_worker_shard_count("worker-b"), b_shards.len());
+
+        let listed = manager.list_dataset_shards("ds-1", 0);
+        assert_eq!(listed.len(), 4);
+        for (assignment, owner) in &listed {
+            assert!(owner.is_some());
+            assert_eq!(assignment.dataset_id, "ds-1");
+        }
+
+        assert!(manager.remove_dataset("ds-1"));
+        assert!(!manager.remove_dataset("ds-1"));
+        assert_eq!(manager.get_worker_shard_count("worker-a"), 0);
+        assert!(manager.list_dataset_shards("ds-1", 0).is_empty());
+    }
+
+    #[test]
+    fn test_local_directory_file_paths_slicing() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..6 {
+            std::fs::write(dir.path().join(format!("part-{:02}.parquet", i)), b"x").unwrap();
+        }
+
+        let manager = ShardManager::new();
+        manager.register_worker("w0");
+        manager
+            .register_dataset_with_info(
+                "local-ds".to_string(),
+                dir.path().to_string_lossy().to_string(),
+                "parquet".to_string(),
+                300,
+                100, // 3 shards -> 2 files per shard
+                false,
+                0,
+                HashMap::new(),
+            )
+            .unwrap();
+
+        let shards = manager.get_shard_for_worker("local-ds", "w0", 0).unwrap();
+        assert_eq!(shards.len(), 3);
+        assert_eq!(shards[0].file_paths.len(), 2);
+        assert_eq!(shards[1].file_paths.len(), 2);
+        assert_eq!(shards[2].file_paths.len(), 2);
+        assert!(shards[0].file_paths[0].ends_with("part-00.parquet"));
+        assert!(shards[0].file_paths[1].ends_with("part-01.parquet"));
+        assert!(shards[2].file_paths[1].ends_with("part-05.parquet"));
     }
 }

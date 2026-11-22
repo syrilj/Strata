@@ -151,10 +151,13 @@ async fn test_multi_worker_training_simulation() -> Result<()> {
         workers.push(worker);
     }
 
-    // Verify world size
+    // Verify world size and assigned ranks
     // Note: world_size captured at registration time reflects the count at that moment
     // The last worker registered should have world_size=4
     assert_eq!(workers[3].world_size, 4);
+    for (idx, worker) in workers.iter().enumerate() {
+        assert_eq!(worker.rank, idx as i32);
+    }
 
     // Register dataset
     let mut client = CoordinatorClient::connect(addr.clone()).await?;
@@ -187,34 +190,26 @@ async fn test_multi_worker_training_simulation() -> Result<()> {
 
         // Checkpoint at intervals
         if step > 0 && step % checkpoint_interval == 0 {
-            // Barrier before checkpoint
+            // Barrier before checkpoint using SimulatedWorker::wait_barrier concurrently
             let barrier_id = format!("pre-ckpt-{}", step);
-            let addr_clone = addr.clone();
             let barrier = Arc::new(Barrier::new(workers.len()));
 
             let mut handles = Vec::new();
-            for (i, _) in workers.iter().enumerate() {
-                let addr = addr_clone.clone();
+            for mut worker in workers.drain(..) {
                 let barrier = barrier.clone();
                 let barrier_id = barrier_id.clone();
-                let worker_id = format!("gpu-node-{}", i);
 
                 handles.push(tokio::spawn(async move {
-                    let mut client = CoordinatorClient::connect(addr).await.unwrap();
                     barrier.wait().await;
-                    client
-                        .wait_barrier(BarrierRequest {
-                            worker_id,
-                            barrier_id,
-                            step: step as i64,
-                        })
-                        .await
+                    worker.wait_barrier(&barrier_id, step).await?;
+                    Ok::<SimulatedWorker, anyhow::Error>(worker)
                 }));
             }
 
             for handle in handles {
-                handle.await??;
+                workers.push(handle.await??);
             }
+            workers.sort_by_key(|w| w.rank);
 
             // All workers checkpoint
             for worker in &mut workers {

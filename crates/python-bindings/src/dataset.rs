@@ -1,10 +1,21 @@
 //! Dataset registry Python bindings
 //!
-//! Exposes `ShardManager` functionality for dataset registration and shard assignment.
+//! Exposes `ShardManager` functionality for local dataset registration and shard assignment,
+//! as well as gRPC-backed coordinator dataset registration and sharding when `coordinator_url`
+//! is provided.
 
+use coordinator::proto::coordinator_client::CoordinatorClient;
 use data_shard::ShardManager;
 use pyo3::prelude::*;
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::runtime::Runtime;
+use tokio::sync::RwLock;
+use tonic::transport::Channel;
+
+use crate::orchestrator::normalize_coordinator_url;
+
+type Client = CoordinatorClient<Channel>;
 
 /// Information about a shard assignment
 #[pyclass]
@@ -57,14 +68,14 @@ impl ShardInfo {
 
 /// Dataset registry for managing distributed data sharding
 ///
-/// Example:
-///     registry = DatasetRegistry()
-///     registry.register_worker("worker-0")
-///     registry.register_dataset("imagenet", total_samples=1281167, shard_size=10000)
-///     shards = registry.get_shards("imagenet", "worker-0", epoch=0)
+/// Supports both local mode (`coordinator_url=None`, backed by `ShardManager`)
+/// and coordinator-backed mode (`coordinator_url="http://..."`, backed by gRPC).
 #[pyclass]
 pub struct DatasetRegistry {
     manager: Arc<ShardManager>,
+    coordinator_url: Option<String>,
+    client: Arc<RwLock<Option<Client>>>,
+    runtime: Arc<Runtime>,
 }
 
 #[pymethods]
@@ -76,67 +87,207 @@ impl DatasetRegistry {
     #[new]
     #[pyo3(signature = (coordinator_url=None))]
     fn new(coordinator_url: Option<&str>) -> PyResult<Self> {
-        // For now, we use a local shard manager
-        // Future: connect to coordinator via gRPC if coordinator_url is provided
-        let _ = coordinator_url; // Reserved for future use
+        let runtime = Runtime::new().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Failed to create async runtime: {}",
+                e
+            ))
+        })?;
 
         Ok(Self {
             manager: Arc::new(ShardManager::new()),
+            coordinator_url: coordinator_url.map(normalize_coordinator_url),
+            client: Arc::new(RwLock::new(None)),
+            runtime: Arc::new(runtime),
         })
     }
 
-    /// Register a worker with the registry
-    ///
-    /// Args:
-    ///     worker_id: Unique identifier for the worker
-    fn register_worker(&self, worker_id: &str) {
+    #[getter]
+    fn coordinator_url(&self) -> Option<String> {
+        self.coordinator_url.clone()
+    }
+
+    /// Register a worker with the registry (local and coordinator if configured)
+    fn register_worker(&self, py: Python<'_>, worker_id: &str) -> PyResult<()> {
         self.manager.register_worker(worker_id);
+        if let Some(url) = &self.coordinator_url {
+            let mut grpc_client = self.get_client_sync(py, url)?;
+            let wid = worker_id.to_string();
+            py.allow_threads(|| {
+                self.runtime.block_on(async move {
+                    let _ = grpc_client
+                        .register_worker(coordinator::proto::WorkerInfo {
+                            worker_id: wid,
+                            hostname: "127.0.0.1".to_string(),
+                            port: 50052,
+                            gpu_count: 0,
+                            memory_bytes: 0,
+                            metadata: HashMap::new(),
+                        })
+                        .await;
+                })
+            });
+        }
+        Ok(())
     }
 
-    /// Remove a worker from the registry
-    ///
-    /// Args:
-    ///     worker_id: Identifier of the worker to remove
-    fn remove_worker(&self, worker_id: &str) {
+    /// Remove a worker from the registry (local and coordinator if configured)
+    fn remove_worker(&self, py: Python<'_>, worker_id: &str) -> PyResult<()> {
         self.manager.remove_worker(worker_id);
+        if let Some(url) = &self.coordinator_url {
+            let mut grpc_client = self.get_client_sync(py, url)?;
+            let wid = worker_id.to_string();
+            py.allow_threads(|| {
+                self.runtime.block_on(async move {
+                    let _ = grpc_client
+                        .deregister_worker(coordinator::proto::WorkerInfo {
+                            worker_id: wid,
+                            hostname: String::new(),
+                            port: 0,
+                            gpu_count: 0,
+                            memory_bytes: 0,
+                            metadata: HashMap::new(),
+                        })
+                        .await;
+                })
+            });
+        }
+        Ok(())
     }
 
-    /// Register a dataset for sharding
-    ///
-    /// Args:
-    ///     dataset_id: Unique identifier for the dataset
-    ///     total_samples: Total number of samples in the dataset
-    ///     shard_size: Number of samples per shard
-    ///     shuffle: Whether to shuffle shards each epoch (default: True)
-    ///     seed: Random seed for shuffling (default: 42)
-    #[pyo3(signature = (dataset_id, total_samples, shard_size, shuffle=true, seed=42))]
+    /// Register a dataset for sharding (local or coordinator-backed)
+    #[pyo3(signature = (dataset_id, total_samples, shard_size, shuffle=true, seed=42, path="", format="parquet"))]
+    #[allow(clippy::too_many_arguments)]
     fn register_dataset(
         &self,
+        py: Python<'_>,
         dataset_id: &str,
         total_samples: u64,
         shard_size: u64,
         shuffle: bool,
         seed: u64,
-    ) {
-        self.manager
-            .register_dataset_params(dataset_id, total_samples, shard_size, shuffle, seed);
+        path: &str,
+        format: &str,
+    ) -> PyResult<()> {
+        if shard_size == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "shard_size must be greater than 0",
+            ));
+        }
+
+        // Always update local shard manager for introspection/fallback
+        let _ = self.manager.register_dataset_with_info(
+            dataset_id.to_string(),
+            path.to_string(),
+            format.to_string(),
+            total_samples,
+            shard_size,
+            shuffle,
+            seed,
+            HashMap::new(),
+        );
+
+        if let Some(url) = &self.coordinator_url {
+            let mut grpc_client = self.get_client_sync(py, url)?;
+            let request = coordinator::proto::DatasetInfo {
+                dataset_id: dataset_id.to_string(),
+                path: path.to_string(),
+                format: format.to_string(),
+                total_samples: total_samples as i64,
+                shard_size: shard_size as i64,
+                shuffle,
+                seed: seed as i64,
+                metadata: HashMap::new(),
+            };
+
+            py.allow_threads(|| {
+                self.runtime.block_on(async move {
+                    grpc_client.register_dataset(request).await.map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "Failed to register dataset with coordinator: {}",
+                            e
+                        ))
+                    })?;
+                    Ok::<(), PyErr>(())
+                })
+            })?;
+        }
+
+        Ok(())
     }
 
-    /// Get shard assignments for a worker in a given epoch
-    ///
-    /// Args:
-    ///     dataset_id: Dataset identifier
-    ///     worker_id: Worker identifier  
-    ///     epoch: Training epoch number
-    ///
-    /// Returns:
-    ///     List of ShardInfo objects assigned to this worker
+    /// Convenience alias for registering a dataset with path and format first
+    #[pyo3(signature = (dataset_id, path, format="parquet", total_samples=10000, shard_size=1000, shuffle=true, seed=42))]
+    #[allow(clippy::too_many_arguments)]
+    fn register(
+        &self,
+        py: Python<'_>,
+        dataset_id: &str,
+        path: &str,
+        format: &str,
+        total_samples: u64,
+        shard_size: u64,
+        shuffle: bool,
+        seed: u64,
+    ) -> PyResult<()> {
+        self.register_dataset(
+            py,
+            dataset_id,
+            total_samples,
+            shard_size,
+            shuffle,
+            seed,
+            path,
+            format,
+        )
+    }
+
+    /// Get all shard assignments for a worker in a given epoch (local mode, or coordinator fallback)
+    #[pyo3(signature = (dataset_id, worker_id, epoch=0))]
     fn get_shards(
         &self,
+        py: Python<'_>,
         dataset_id: &str,
         worker_id: &str,
         epoch: u64,
     ) -> PyResult<Vec<ShardInfo>> {
+        if let Some(url) = &self.coordinator_url {
+            if let Ok(mut grpc_client) = self.get_client_sync(py, url) {
+                let did = dataset_id.to_string();
+                let wid = worker_id.to_string();
+                let res: Result<ShardInfo, PyErr> = py.allow_threads(|| {
+                    self.runtime.block_on(async move {
+                        let response = grpc_client
+                            .get_data_shard(coordinator::proto::ShardRequest {
+                                worker_id: wid,
+                                dataset_id: did,
+                                epoch: epoch as i64,
+                            })
+                            .await
+                            .map_err(|e| {
+                                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                    "Failed to get shard from coordinator: {}",
+                                    e
+                                ))
+                            })?;
+                        let s = response.into_inner();
+                        Ok(ShardInfo {
+                            dataset_id: s.dataset_id,
+                            shard_id: s.shard_id as u64,
+                            total_shards: s.total_shards as u64,
+                            start_index: s.start_index as u64,
+                            end_index: s.end_index as u64,
+                            epoch: s.epoch as u64,
+                            file_paths: s.file_paths,
+                        })
+                    })
+                });
+                if let Ok(shard) = res {
+                    return Ok(vec![shard]);
+                }
+            }
+        }
+
         let assignments = self
             .manager
             .get_shard_for_worker(dataset_id, worker_id, epoch)
@@ -161,13 +312,98 @@ impl DatasetRegistry {
             .collect())
     }
 
+    /// Convenience method returning a single ShardInfo for a worker or rank
+    #[pyo3(signature = (dataset_id, worker_id=None, worker_rank=None, epoch=0))]
+    fn get_shard(
+        &self,
+        py: Python<'_>,
+        dataset_id: &str,
+        worker_id: Option<&str>,
+        worker_rank: Option<u64>,
+        epoch: u64,
+    ) -> PyResult<ShardInfo> {
+        let resolved_worker = match worker_id {
+            Some(wid) if !wid.is_empty() => wid.to_string(),
+            _ => match worker_rank {
+                Some(rank) => format!("worker-{}", rank),
+                None => "worker-0".to_string(),
+            },
+        };
+
+        if let Some(url) = &self.coordinator_url {
+            let mut grpc_client = self.get_client_sync(py, url)?;
+            let did = dataset_id.to_string();
+            let wid = resolved_worker.clone();
+
+            return py.allow_threads(|| {
+                self.runtime.block_on(async move {
+                    // Try get_data_shard first; if coordinator has no registered workers yet,
+                    // auto-register the worker id so standalone DatasetRegistry usage succeeds.
+                    let first_attempt = grpc_client
+                        .get_data_shard(coordinator::proto::ShardRequest {
+                            worker_id: wid.clone(),
+                            dataset_id: did.clone(),
+                            epoch: epoch as i64,
+                        })
+                        .await;
+
+                    let response = match first_attempt {
+                        Ok(resp) => resp,
+                        Err(_) => {
+                            let _ = grpc_client
+                                .register_worker(coordinator::proto::WorkerInfo {
+                                    worker_id: wid.clone(),
+                                    hostname: "127.0.0.1".to_string(),
+                                    port: 50052,
+                                    gpu_count: 0,
+                                    memory_bytes: 0,
+                                    metadata: HashMap::new(),
+                                })
+                                .await;
+
+                            grpc_client
+                                .get_data_shard(coordinator::proto::ShardRequest {
+                                    worker_id: wid,
+                                    dataset_id: did,
+                                    epoch: epoch as i64,
+                                })
+                                .await
+                                .map_err(|e| {
+                                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                        "Failed to get shard from coordinator: {}",
+                                        e
+                                    ))
+                                })?
+                        }
+                    };
+
+                    let s = response.into_inner();
+                    Ok(ShardInfo {
+                        dataset_id: s.dataset_id,
+                        shard_id: s.shard_id as u64,
+                        total_shards: s.total_shards as u64,
+                        start_index: s.start_index as u64,
+                        end_index: s.end_index as u64,
+                        epoch: s.epoch as u64,
+                        file_paths: s.file_paths,
+                    })
+                })
+            });
+        }
+
+        if self.manager.active_worker_count() == 0 {
+            self.manager.register_worker(&resolved_worker);
+        }
+        let shards = self.get_shards(py, dataset_id, &resolved_worker, epoch)?;
+        shards.into_iter().next().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "No shards available for worker '{}' on dataset '{}'",
+                resolved_worker, dataset_id
+            ))
+        })
+    }
+
     /// Advance to the next epoch for a dataset
-    ///
-    /// Args:
-    ///     dataset_id: Dataset identifier
-    ///
-    /// Returns:
-    ///     The new epoch number
     fn advance_epoch(&self, dataset_id: &str) -> PyResult<u64> {
         self.manager.advance_epoch(dataset_id).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(format!("Dataset '{}' not found", dataset_id))
@@ -175,12 +411,6 @@ impl DatasetRegistry {
     }
 
     /// Get the current epoch for a dataset
-    ///
-    /// Args:
-    ///     dataset_id: Dataset identifier
-    ///
-    /// Returns:
-    ///     Current epoch number
     fn current_epoch(&self, dataset_id: &str) -> u64 {
         self.manager.current_epoch(dataset_id)
     }
@@ -209,9 +439,52 @@ impl DatasetRegistry {
 
     fn __repr__(&self) -> String {
         format!(
-            "DatasetRegistry(workers={}, datasets={})",
+            "DatasetRegistry(workers={}, datasets={}, coordinator_url={:?})",
             self.manager.active_worker_count(),
-            self.manager.dataset_count()
+            self.manager.dataset_count(),
+            self.coordinator_url
         )
+    }
+}
+
+impl DatasetRegistry {
+    fn get_client_sync(&self, py: Python<'_>, url: &str) -> PyResult<Client> {
+        let client_lock = self.client.clone();
+        let target_url = url.to_string();
+
+        py.allow_threads(|| {
+            self.runtime.block_on(async move {
+                {
+                    let guard = client_lock.read().await;
+                    if let Some(client) = guard.as_ref() {
+                        return Ok(client.clone());
+                    }
+                }
+
+                let channel = Channel::from_shared(target_url)
+                    .map_err(|e| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "Invalid coordinator URL: {}",
+                            e
+                        ))
+                    })?
+                    .connect()
+                    .await
+                    .map_err(|e| {
+                        pyo3::exceptions::PyConnectionError::new_err(format!(
+                            "Failed to connect to coordinator: {}",
+                            e
+                        ))
+                    })?;
+
+                let new_client = CoordinatorClient::new(channel);
+                let mut guard = client_lock.write().await;
+                if let Some(existing) = guard.as_ref() {
+                    return Ok(existing.clone());
+                }
+                *guard = Some(new_client.clone());
+                Ok(new_client)
+            })
+        })
     }
 }

@@ -19,6 +19,8 @@
 //! ckpt.save(model_bytes, step=1000, epoch=5)
 //! ```
 
+#![allow(clippy::useless_conversion)]
+
 use pyo3::prelude::*;
 
 mod checkpoint;
@@ -35,6 +37,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<checkpoint::CheckpointInfo>()?;
     m.add_class::<orchestrator::TrainingOrchestrator>()?;
     m.add_class::<orchestrator::WorkerConfig>()?;
+    m.add_class::<orchestrator::CoordinatorShardInfo>()?;
+    m.add_class::<orchestrator::BarrierResult>()?;
+    m.add_class::<orchestrator::CoordinatorCheckpointInfo>()?;
 
     // Add version info
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

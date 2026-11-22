@@ -208,14 +208,27 @@ impl WorkerRegistry {
             "Worker registered"
         );
 
-        let result = worker.clone();
-        self.workers.insert(worker.id.clone(), worker);
+        let worker_id = worker.id.clone();
+        self.workers.insert(worker_id.clone(), worker);
+
+        // Update world_size across all registered workers to reflect the new count
+        let new_world_size = (self.workers.len() as u32).max(1);
+        for mut entry in self.workers.iter_mut() {
+            entry.value_mut().world_size = new_world_size;
+        }
+
+        let result = self
+            .workers
+            .get(&worker_id)
+            .map(|w| w.clone())
+            .expect("worker was just inserted");
         Ok(result)
     }
 
     /// Deregister a worker
     pub fn deregister(&self, worker_id: &str) -> Result<WorkerInfo> {
-        self.workers
+        let removed = self
+            .workers
             .remove(worker_id)
             .map(|(_, w)| {
                 info!(worker_id = %worker_id, "Worker deregistered");
@@ -223,7 +236,32 @@ impl WorkerRegistry {
             })
             .ok_or_else(|| Error::WorkerNotFound {
                 worker_id: worker_id.to_string(),
-            })
+            })?;
+
+        let new_world_size = (self.workers.len() as u32).max(1);
+        for mut entry in self.workers.iter_mut() {
+            entry.value_mut().world_size = new_world_size;
+        }
+
+        Ok(removed)
+    }
+
+    /// Set GPU count and memory bytes on a registered worker
+    pub fn set_worker_hardware(
+        &self,
+        worker_id: &str,
+        gpu_count: u32,
+        memory_bytes: u64,
+    ) -> Result<()> {
+        let mut worker = self
+            .workers
+            .get_mut(worker_id)
+            .ok_or_else(|| Error::WorkerNotFound {
+                worker_id: worker_id.to_string(),
+            })?;
+        worker.gpu_count = gpu_count;
+        worker.memory_bytes = memory_bytes;
+        Ok(())
     }
 
     /// Get worker info by ID
@@ -407,5 +445,30 @@ mod tests {
         registry.register(worker.clone()).unwrap();
         let result = registry.register(worker);
         assert!(matches!(result, Err(Error::WorkerAlreadyRegistered { .. })));
+    }
+
+    #[test]
+    fn test_world_size_updates_and_hardware() {
+        let registry = WorkerRegistry::new(10, Duration::from_secs(30));
+
+        let w1 = WorkerInfo::new("worker-1".to_string(), "host1".to_string(), 50052, 0, 1);
+        let w2 = WorkerInfo::new("worker-2".to_string(), "host2".to_string(), 50053, 0, 1);
+
+        let r1 = registry.register(w1).unwrap();
+        assert_eq!(r1.world_size, 1);
+
+        let r2 = registry.register(w2).unwrap();
+        assert_eq!(r2.world_size, 2);
+        assert_eq!(registry.get("worker-1").unwrap().world_size, 2);
+
+        registry
+            .set_worker_hardware("worker-1", 4, 32 * 1024 * 1024 * 1024)
+            .unwrap();
+        let updated = registry.get("worker-1").unwrap();
+        assert_eq!(updated.gpu_count, 4);
+        assert_eq!(updated.memory_bytes, 32 * 1024 * 1024 * 1024);
+
+        registry.deregister("worker-2").unwrap();
+        assert_eq!(registry.get("worker-1").unwrap().world_size, 1);
     }
 }

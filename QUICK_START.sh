@@ -11,8 +11,8 @@ echo ""
 if lsof -i :51051 >/dev/null 2>&1; then
     echo "✅ Coordinator is running"
 else
-    echo "❌ Coordinator not running. Starting it..."
-    echo "   Run: DEMO_MODE=true cargo run --bin coordinator -- 0.0.0.0:50051"
+    echo "❌ Coordinator not running. Start it first:"
+    echo "   Run: cargo run --bin coordinator -- 0.0.0.0:50051   (or ./run-local.sh)"
     exit 1
 fi
 
