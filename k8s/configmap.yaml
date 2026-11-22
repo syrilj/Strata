@@ -10,7 +10,7 @@ metadata:
     app.kubernetes.io/name: strata
 data:
   RUST_LOG: "info,coordinator=debug"
-  STORAGE_BACKEND: "local" # switch to "s3" + secret.yaml for production S3
+  STORAGE_BACKEND: "local" # "s3" is parsed but not supported yet (falls back to local)
   CHECKPOINT_DIR: "/data/checkpoints"
   DEMO_MODE: "false" # "true" serves the seeded development dataset
   COORDINATOR_API_URL: "http://127.0.0.1:51051"

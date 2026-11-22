@@ -1,5 +1,6 @@
 # Persistent storage for local-backend checkpoints.
-# Not needed when STORAGE_BACKEND=s3 (then this PVC can be dropped).
+# Required: the coordinator always writes checkpoints to local disk. S3 is not
+# wired into the coordinator yet (STORAGE_BACKEND=s3 falls back to local).
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
