@@ -135,11 +135,10 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-python-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Install maturin
-        run: pip install maturin pytest pytest-asyncio
-
-      - name: Build Python bindings
-        run: maturin develop
+      # `maturin develop` refuses to run outside a virtualenv; installing the
+      # package with pip builds the PyO3 extension through maturin instead.
+      - name: Build and install Python package
+        run: pip install -e ".[dev]"
 
       - name: Run Python tests
         run: pytest tests/python/ -v --tb=short
