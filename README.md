@@ -11,7 +11,7 @@ A high-performance distributed runtime for coordinating data loading, checkpoint
 
 **Strata** is the production-grade control plane: Rust + Tokio coordinator, gRPC worker mesh, S3/local checkpointing, Python API, and a real-time React dashboard.
 
-**[Architecture](docs/ARCHITECTURE.md)** | **[API Docs](docs/API.md)** | **[Deployment Guide](docs/DEPLOYMENT.md)** | **[Interview Guide](docs/INTERVIEW_GUIDE.md)** | **[Security](SECURITY.md)** | **[Changelog](CHANGELOG.md)**
+**[Architecture](docs/ARCHITECTURE.md)** | **[API Docs](docs/API.md)** | **[Deployment Guide](docs/DEPLOYMENT.md)** | **[Security](SECURITY.md)** | **[Changelog](CHANGELOG.md)**
 
 ## 🚀 Getting Started
 
@@ -325,7 +325,6 @@ cargo bench --bench data_loading
 - **[Architecture Deep Dive](docs/ARCHITECTURE.md)**: System design, component interactions, design decisions
 - **[API Reference](docs/API.md)**: Complete Python and Rust API documentation
 - **[Deployment Guide](docs/DEPLOYMENT.md)**: Docker, Kubernetes, AWS deployment instructions
-- **[Interview Guide](docs/INTERVIEW_GUIDE.md)**: Design decisions, trade-offs, common interview questions
 - **[Contributing](CONTRIBUTING.md)**: Development workflow, code style, PR process
 - **[Changelog](CHANGELOG.md)**: Version history and changes
 
@@ -370,7 +369,6 @@ strata/
 │   ├── rust/                  # Rust integration tests
 │   ├── python/                # Python test suite
 │   └── demos/                 # Seeded training scenarios
-│       ├── demo.py            # Seeded multi-worker training run
 │       ├── test_training.py   # Multi-worker test
 │       └── distributed_task.py # Distributed decryption demo
 ├── dashboard/                 # React monitoring UI
@@ -386,7 +384,6 @@ strata/
     ├── ARCHITECTURE.md
     ├── API.md
     ├── DEPLOYMENT.md
-    └── INTERVIEW_GUIDE.md
 ```
 
 ## Tech Stack

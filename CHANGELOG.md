@@ -63,7 +63,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Architecture deep dive
   - Complete API reference
   - Deployment guide (Docker, Kubernetes, AWS)
-  - Interview preparation guide
 
 - **Benchmarks**:
   - Checkpoint throughput benchmarks (500 MB/s local, 200 MB/s S3)
