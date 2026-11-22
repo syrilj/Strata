@@ -1,7 +1,7 @@
 # Architecture
 
 > Rendered diagrams (Mermaid) first — ASCII fallback preserved below for
-> terminals. Print-ready TikZ spec lives in [`SYSTEM_ARCHITECTURE.tex`](SYSTEM_ARCHITECTURE.tex).
+> terminals.
 
 ## System Overview (Mermaid)
 
@@ -23,7 +23,7 @@ flowchart TB
         STORE[Storage Backend]
     end
     subgraph Infra["Distributed Infrastructure"]
-        NODES[Worker Nodes 100s-1000s]
+        NODES[Worker Nodes]
         COORD[Coordinator Server]
         S3[S3 / Local Storage]
         UI[Strata Dashboard]
@@ -58,23 +58,21 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    A[save_async called] --> B[Serialize state sync ~100ms]
+    A[save_async called] --> B[Enqueue write request]
     B --> C[Spawn Tokio background task]
     C --> D[Write Local atomic rename]
-    C --> E[S3 multipart upload]
     D & E --> F[Notify coordinator metadata]
 ```
 
 ## System Overview (ASCII fallback)
 
-The Distributed Training Runtime is a high-performance system designed to coordinate data loading, checkpointing, and state management across hundreds to thousands of worker nodes in large-scale ML training jobs.
+Strata coordinates data-shard assignment, checkpoint persistence, and barrier synchronization for distributed ML training workers. It has been tested on a single machine only (see [BENCHMARKS.md](../BENCHMARKS.md)); multi-node scale has not been measured.
 
 ### Design Principles
 
-1. **Performance**: Async Rust core with Tokio for maximum I/O throughput
-2. **Fault Tolerance**: Automatic recovery from worker failures with checkpoint replay
-3. **Scalability**: Designed to scale from 10s to 1000s of workers
-4. **Simplicity**: Pythonic API while maintaining low-level performance
+1. **Async I/O**: Rust core on Tokio; checkpoint writes run on a background task
+2. **Failure handling**: dead workers are reaped after a heartbeat timeout and their shards reassigned; workers can query the latest checkpoint to resume
+3. **Simplicity**: a small Python API (PyO3) over the Rust core
 
 ## High-Level Architecture
 
@@ -110,7 +108,7 @@ The Distributed Training Runtime is a high-performance system designed to coordi
 │                   Distributed Infrastructure                   │
 │  ┌──────────────┐  ┌──────────────┐  ┌───────────────────┐  │
 │  │ Worker Nodes │  │ Coordinator  │  │ S3/Storage        │  │
-│  │ (100s-1000s) │  │ Server       │  │ Backend           │  │
+│  │              │  │ Server       │  │ Backend           │  │
 │  └──────────────┘  └──────────────┘  └───────────────────┘  │
 └───────────────────────────────────────────────────────────────┘
 ```
@@ -146,10 +144,7 @@ service CoordinatorService {
 }
 ```
 
-**Performance Characteristics**:
-- Worker registration: ~1000 workers/sec
-- Heartbeat processing: ~10000 requests/sec
-- Barrier sync (100 workers): <50ms p99 latency
+**Performance**: see [BENCHMARKS.md](../BENCHMARKS.md) for single-machine measurements of registration, heartbeat, shard lookup and barrier RPCs.
 
 ### 2. Data Shard Manager
 
@@ -172,35 +167,35 @@ fn get_node_for_shard(shard_id: usize) -> WorkerID {
 }
 ```
 
+**Important**: the hash ring is used only for datasets registered with `shuffle=false`. With `shuffle=true` (the default) shards are permuted with a seeded per-epoch shuffle (ChaCha8, seed derived from base seed + dataset + epoch) and dealt round-robin by worker rank, so adding or removing a worker reassigns most shards.
+
 **Trade-offs**:
-- Virtual nodes increase memory but improve distribution uniformity
-- 150 virtual nodes achieves <5% deviation from perfect balance
+- Virtual nodes (150 per worker) increase memory but improve distribution uniformity
+- Unit tests check that each of 3 workers gets within ±50% of an even share, and that removing a node only moves keys that were on that node. Tighter balance bounds have not been measured.
 
 **Performance**:
-- Shard assignment: O(log n) where n = workers * virtual_nodes
-- 1000 workers, 10000 shards: <10ms total assignment time
+- Ring lookup is a binary search over `workers * virtual_nodes` entries
+- Measured assignment times are in [BENCHMARKS.md](../BENCHMARKS.md)
 
 ### 3. Checkpoint Manager
 
 **Purpose**: Async checkpoint persistence with background I/O
 
 **Key Features**:
-- Non-blocking async writes
-- Configurable storage backends (Local, S3)
-- Automatic retry logic
-- Compression support
+- `save_async` enqueues the write and returns; a background Tokio task performs it
+- Local storage writes a temp file, fsyncs it, then renames it into place
+- Optional LZ4 compression
+- Storage is behind a `StorageBackend` trait (see S3 note below)
 
 **Write Path**:
 ```
 User calls save_async()
   ↓
-Serialize state (sync)
+Enqueue write request on a channel
   ↓
-Spawn background task
+Return checkpoint id to caller
   ↓
-Write to storage (async I/O)
-  ↓
-Return immediately
+Background writer task: (optional LZ4) → header + payload → storage.write
 ```
 
 **Storage Abstraction**:
@@ -215,13 +210,10 @@ pub trait StorageBackend: Send + Sync {
 ```
 
 **Implementations**:
-- **LocalBackend**: File system storage with atomic writes
-- **S3Backend**: AWS S3 with multipart upload for large checkpoints
+- **LocalStorage**: file system storage with atomic (temp file + fsync + rename) writes
+- **S3Storage**: implemented in the `storage` crate behind the non-default `s3` cargo feature (multipart upload, retry with backoff). It is **not wired into the coordinator binary or the Python API**: setting `STORAGE_BACKEND=s3` makes the coordinator log a warning and fall back to local storage. It has unit tests for key/config handling only and has not been run against S3.
 
-**Performance**:
-- 100MB checkpoint write: ~500 MB/s to local SSD
-- S3 multipart upload: ~200 MB/s (network bound)
-- Concurrent writes (8 workers): Linear scaling up to storage bandwidth
+**Performance**: see [BENCHMARKS.md](../BENCHMARKS.md) (local storage only).
 
 ### 4. Runtime Core
 
@@ -250,31 +242,11 @@ Initialize → Register → Heartbeat Loop → Train → Checkpoint → Finalize
 - `TrainingOrchestrator`: High-level training coordination
 
 **FFI Strategy**:
-- PyO3 for zero-copy data passing where possible
+- Checkpoint bytes are copied once from the Python `bytes` object into a Rust `Bytes` buffer (not zero-copy)
 - pyo3-async-runtimes for async/await integration
-- GIL management for parallel operations
+- Blocking calls release the GIL while waiting on the Tokio runtime
 
-**Example Binding**:
-```rust
-#[pyclass]
-pub struct CheckpointManager {
-    inner: Arc<checkpoint::CheckpointManager>,
-    runtime: Arc<Runtime>,
-}
-
-#[pymethods]
-impl CheckpointManager {
-    #[pyo3(signature = (data, step))]
-    fn save_async<'py>(
-        &self,
-        py: Python<'py>,
-        data: &PyBytes,
-        step: u64,
-    ) -> PyResult<&'py PyAny> {
-        // Async binding with pyo3_asyncio
-    }
-}
-```
+The bindings live in `crates/python-bindings/src/` (`checkpoint.rs`, `dataset.rs`, `orchestrator.rs`).
 
 ## Data Flow
 
@@ -285,7 +257,7 @@ impl CheckpointManager {
      ↓
 2. DatasetRegistry.get_shard()
      ↓ gRPC
-3. Coordinator assigns shard via consistent hash
+3. Coordinator assigns shards (seeded shuffle + round-robin, or consistent hash when shuffle=false)
      ↓
 4. Worker loads data from assigned files
      ↓
@@ -293,7 +265,7 @@ impl CheckpointManager {
      ↓
 6. (Every N steps) CheckpointManager.save_async()
      ↓ Spawn task
-7. Background thread writes to storage
+7. Background Tokio task writes to storage
      ↓ gRPC (notify)
 8. Coordinator records checkpoint metadata
 ```
@@ -349,7 +321,7 @@ impl CheckpointManager {
 ### Why Consistent Hashing?
 
 **Advantages**:
-1. **Minimal Redistribution**: Only ~K/N shards move when worker added/removed
+1. **Minimal Redistribution**: Only ~K/N shards move when a worker is added/removed (applies to `shuffle=false` datasets)
 2. **Deterministic**: Same shard always goes to same worker (given same topology)
 3. **Stateless**: No central shard assignment table needed
 
@@ -361,125 +333,43 @@ impl CheckpointManager {
 - Modulo hashing: Simple but terrible for dynamic scaling (all shards move)
 - Centralized table: Doesn't scale, single point of contention
 
-## Scalability Analysis
+## Scaling Considerations (not measured)
 
-### Coordinator Bottleneck Analysis
+Nothing in this section has been load-tested beyond one machine. These are design notes, not results.
 
-**State Size**:
-- Worker info: ~1KB per worker
-- Dataset metadata: ~10KB per dataset
-- Barrier state: ~100 bytes per barrier
-- Checkpoint metadata: ~500 bytes per checkpoint
-
-**For 1000 workers, 100 datasets, 10000 checkpoints**:
-- Memory: ~10 MB (negligible)
-- Network: Heartbeats are main load
-
-**Heartbeat Load**:
-- Frequency: 1 Hz per worker
-- 1000 workers = 1000 RPS
-- Tonic can handle >100K RPS on modern hardware
-- **Verdict**: Not a bottleneck until >10K workers
-
-**Barrier Synchronization**:
-- All workers must arrive before releasing
-- Coordinator holds N connections open
-- With 1000 workers: ~50ms coordination overhead
-- **Optimization**: Use generation counter instead of per-worker tracking
-
-### Storage Bottleneck
-
-**Checkpoint Write**:
-- 100 workers * 1GB checkpoint = 100 GB
-- Local NVMe: ~3 GB/s write → 33 seconds
-- S3: ~200 MB/s per worker → 5 seconds parallel
-
-**Mitigation**:
-- Async writes don't block training
-- Write to local, async upload to S3
-- Delta checkpoints for large models
-
-### Network Bandwidth
-
-**Data Loading**:
-- Assume 1M samples/sec total across 100 workers
-- 1KB per sample → 1 GB/s
-- 10 GbE network: 1.25 GB/s → Acceptable
-
-**gRPC Overhead**:
-- Protobuf adds ~5-10% size overhead
-- HTTP/2 header compression mitigates this
-- Measured: <3% overhead in practice
+- **Coordinator state** is in-memory (`DashMap`s for workers, datasets, barriers). Restarting the coordinator loses registrations, datasets and barriers. Checkpoint files in the coordinator's storage directory are rescanned at startup; checkpoints that workers only reported via `NotifyCheckpoint` are not persisted.
+- **Heartbeats** are the steady-state load: one unary RPC per worker per heartbeat interval (default 5 s). A bidirectional `StreamHeartbeats` RPC also exists.
+- **Barriers** hold one pending RPC per participating worker until all have arrived.
+- **Checkpoint I/O** is bounded by the storage device; the coordinator only stores metadata.
 
 ## Fault Tolerance
 
-### Failure Scenarios
+1. **Worker crash**
+   - Detection: no heartbeat within `heartbeat_timeout` (default 30 s); the reaper runs every `dead_worker_check_interval` (default 5 s)
+   - Recovery: the worker is removed, shards are rebalanced across remaining workers, active barriers are re-evaluated; a restarted worker calls `GetLatestCheckpoint` to find where to resume
+   - Covered by `tests/rust/tests/e2e_training_simulation.rs::test_worker_failure_recovery`
 
-1. **Worker Crash**
-   - Detection: Missed heartbeats (timeout 30s)
-   - Recovery: Redistribute shards, new worker loads latest checkpoint
-   - Data loss: None (checkpoints persisted)
+2. **Coordinator crash**
+   - Single point of failure. Worker, dataset and barrier state is in memory and is lost on restart (see above).
+   - Future work: replicated coordinator (e.g. Raft)
 
-2. **Coordinator Crash**
-   - **Current**: Single point of failure
-   - **Mitigation**: Kubernetes with auto-restart, workers retry connection
-   - **Future**: Raft consensus for HA coordinator
+3. **Graceful shutdown**
+   - The coordinator handles Ctrl+C and SIGTERM and shuts the gRPC server down gracefully
+   - Workers can call `TrainingOrchestrator.deregister()`; there is no automatic deregistration on worker exit
 
-3. **Network Partition**
-   - Workers can't reach coordinator
-   - Training can continue with cached shard assignments
-   - Checkpoints queue locally, sync when connection restored
+## Implementation Notes
 
-4. **Storage Failure**
-   - S3: Built-in redundancy (99.999999999% durability)
-   - Local: Regular backup to S3
-
-### Consistency Model
-
-**Checkpointing**:
-- Async writes → eventual consistency
-- Coordinator tracks "last known good" checkpoint
-- Workers wait for barrier before finalizing checkpoint epoch
-
-**Shard Assignment**:
-- Deterministic (consistent hash) → no coordination needed for reads
-- Workers can compute shard locally if coordinator unavailable
-
-## Performance Optimizations
-
-### 1. Zero-Copy Where Possible
-
-- PyO3 `PyBytes::as_bytes()` → no memcpy
-- Tokio uses vectored I/O for scatter/gather
-- mmap for large dataset files
-
-### 2. Async I/O
-
-- All network and disk I/O is non-blocking
-- Tokio work-stealing scheduler balances load
-- Dedicated thread pool for blocking ops (e.g., compression)
-
-### 3. Lock-Free Data Structures
-
-- DashMap for concurrent hash maps (no global lock)
-- Atomic counters for metrics
-- RwLock only where mutation is rare
-
-### 4. Batch Operations
-
-- Group multiple shard requests into single RPC
-- Batch checkpoint metadata updates
-- Reduces RPC overhead by ~10x
+- **Concurrency**: shared state uses `DashMap` (sharded locks) and `parking_lot` locks; counters use atomics
+- **Checkpoint data path**: one copy from Python `bytes` into Rust; optional LZ4; temp file + fsync + rename
+- **Request guards**: per-client token-bucket rate limiter, input validation, and per-RPC request metrics (`crates/coordinator/src/middleware.rs`)
 
 ## Future Enhancements
 
 1. **High Availability Coordinator**
    - Raft consensus for coordinator replication
-   - Automatic failover <1 second
 
 2. **Delta Checkpoints**
    - Only save changed parameters
-   - Reduces checkpoint size by ~90% for large models
 
 3. **Speculative Execution**
    - Detect stragglers, duplicate work on backup workers
