@@ -62,7 +62,8 @@ def coordinator_server(tmp_path_factory):
     env = os.environ.copy()
     env["GRPC_ADDR"] = addr
     env["HTTP_ADDR"] = http_addr
-    env["STORAGE_BASE_PATH"] = str(ckpt_dir)
+    # The coordinator reads CHECKPOINT_DIR; without it, it writes to ./data in the repo.
+    env["CHECKPOINT_DIR"] = str(ckpt_dir)
     env["DEMO_MODE"] = "false"
 
     proc = subprocess.Popen(
