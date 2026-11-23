@@ -11,7 +11,7 @@ Be respectful and constructive in all interactions.
 ### Prerequisites
 
 - Rust 1.75+ ([install](https://rustup.rs/))
-- Python 3.9+
+- Python 3.10+
 - Git
 
 ### Development Setup

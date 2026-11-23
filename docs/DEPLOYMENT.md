@@ -15,7 +15,7 @@ There is no authentication or TLS on the gRPC or HTTP endpoints. Only run the co
 
 ## Build from Source
 
-Prerequisites: Rust (stable, via `rustup`), `protoc` (e.g. `apt-get install protobuf-compiler`), Python 3.9+.
+Prerequisites: Rust (stable, via `rustup`), `protoc` (e.g. `apt-get install protobuf-compiler`), Python 3.10+.
 
 ```bash
 git clone https://github.com/syrilj/Strata.git

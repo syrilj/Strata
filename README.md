@@ -63,9 +63,9 @@ More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/API.md](docs
 
 ## Quick start
 
-Verified on Ubuntu 24.04 with Rust 1.97 and Python 3.13. `pyproject.toml` declares Python 3.9+.
+Verified on Ubuntu 24.04 with Rust 1.97 and Python 3.13. `pyproject.toml` declares Python 3.10+.
 
-Prerequisites: Rust (stable, via `rustup`), `protoc` (`sudo apt-get install protobuf-compiler` on Debian/Ubuntu), Python 3.9+.
+Prerequisites: Rust (stable, via `rustup`), `protoc` (`sudo apt-get install protobuf-compiler` on Debian/Ubuntu), Python 3.10+.
 
 ```bash
 git clone https://github.com/syrilj/Strata.git
