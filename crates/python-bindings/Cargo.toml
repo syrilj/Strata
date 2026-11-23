@@ -9,6 +9,9 @@ authors.workspace = true
 name = "_core"
 crate-type = ["cdylib"]
 
+[build-dependencies]
+pyo3-build-config = "0.30"
+
 [dependencies]
 # Internal crates
 runtime-core = { path = "../runtime-core" }

@@ -1147,6 +1147,7 @@ dependencies = [
  "data-shard",
  "pyo3",
  "pyo3-async-runtimes",
+ "pyo3-build-config",
  "runtime-core",
  "storage",
  "tokio",
