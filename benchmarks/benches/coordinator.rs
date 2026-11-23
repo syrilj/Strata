@@ -6,23 +6,22 @@ use coordinator::proto::{
 };
 use coordinator::{CoordinatorClient, CoordinatorService, CoordinatorServiceServer};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use std::net::SocketAddr;
-use std::str::FromStr;
 use std::time::Duration;
 use tonic::transport::Server;
 
 fn start_coordinator_for_bench(rt: &tokio::runtime::Runtime) -> String {
     let addr = rt.block_on(async {
         let service = CoordinatorService::new().await.unwrap();
-        let port = portpicker::pick_unused_port().expect("No ports free");
-        let addr = SocketAddr::from_str(&format!("127.0.0.1:{}", port)).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
 
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
         let svc = CoordinatorServiceServer::new(service);
         let server = Server::builder()
             .add_service(svc)
-            .serve_with_shutdown(addr, async {
+            .serve_with_incoming_shutdown(incoming, async {
                 let _ = rx.await;
             });
 

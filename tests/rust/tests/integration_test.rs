@@ -6,8 +6,6 @@ use coordinator::proto::{
 use coordinator::CoordinatorClient; // The generated gRPC client
 use coordinator::CoordinatorService;
 use coordinator::CoordinatorServiceServer; // The generated gRPC server wrapper
-use std::net::SocketAddr;
-use std::str::FromStr;
 use std::time::Duration;
 use tokio::time::sleep;
 use tonic::transport::Server;
@@ -18,8 +16,11 @@ async fn start_coordinator() -> Result<(String, tokio::sync::oneshot::Sender<()>
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    let port = portpicker::pick_unused_port().expect("No ports free");
-    let addr = SocketAddr::from_str(&format!("127.0.0.1:{}", port))?;
+    // Bind to an OS-assigned port and hand the listener straight to tonic, so
+    // there is no race between choosing a port and binding it.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
 
     let (tx, rx) = tokio::sync::oneshot::channel();
 
@@ -28,7 +29,7 @@ async fn start_coordinator() -> Result<(String, tokio::sync::oneshot::Sender<()>
 
     let server = Server::builder()
         .add_service(svc)
-        .serve_with_shutdown(addr, async {
+        .serve_with_incoming_shutdown(incoming, async {
             rx.await.ok();
         });
 
@@ -245,14 +246,17 @@ async fn test_http_rest_api_end_to_end() -> Result<()> {
     );
     let router = create_router(Arc::clone(&service));
 
-    let port = portpicker::pick_unused_port().expect("No ports free");
-    let addr = SocketAddr::from_str(&format!("127.0.0.1:{}", port))?;
+    // Bind to an OS-assigned port and hand the listener straight to tonic, so
+    // there is no race between choosing a port and binding it.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let grpc_svc = CoordinatorServiceServer::new((*service).clone());
     tokio::spawn(
         Server::builder()
             .add_service(grpc_svc)
-            .serve_with_shutdown(addr, async {
+            .serve_with_incoming_shutdown(incoming, async {
                 let _ = rx.await;
             }),
     );
