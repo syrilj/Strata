@@ -41,7 +41,7 @@ aws-config = "1.5"
 
 # HTTP API
 axum = "0.7"
-tower-http = { version = "0.5", features = ["cors"] }
+tower-http = { version = "0.7", features = ["cors"] }
 
 # Utilities
 thiserror = "2.0"
