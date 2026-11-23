@@ -113,7 +113,7 @@ impl DatasetRegistry {
         if let Some(url) = &self.coordinator_url {
             let mut grpc_client = self.get_client_sync(py, url)?;
             let wid = worker_id.to_string();
-            py.allow_threads(|| {
+            py.detach(|| {
                 self.runtime.block_on(async move {
                     let _ = grpc_client
                         .register_worker(coordinator::proto::WorkerInfo {
@@ -137,7 +137,7 @@ impl DatasetRegistry {
         if let Some(url) = &self.coordinator_url {
             let mut grpc_client = self.get_client_sync(py, url)?;
             let wid = worker_id.to_string();
-            py.allow_threads(|| {
+            py.detach(|| {
                 self.runtime.block_on(async move {
                     let _ = grpc_client
                         .deregister_worker(coordinator::proto::WorkerInfo {
@@ -200,7 +200,7 @@ impl DatasetRegistry {
                 metadata: HashMap::new(),
             };
 
-            py.allow_threads(|| {
+            py.detach(|| {
                 self.runtime.block_on(async move {
                     grpc_client.register_dataset(request).await.map_err(|e| {
                         pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -255,7 +255,7 @@ impl DatasetRegistry {
             if let Ok(mut grpc_client) = self.get_client_sync(py, url) {
                 let did = dataset_id.to_string();
                 let wid = worker_id.to_string();
-                let res: Result<ShardInfo, PyErr> = py.allow_threads(|| {
+                let res: Result<ShardInfo, PyErr> = py.detach(|| {
                     self.runtime.block_on(async move {
                         let response = grpc_client
                             .get_data_shard(coordinator::proto::ShardRequest {
@@ -335,7 +335,7 @@ impl DatasetRegistry {
             let did = dataset_id.to_string();
             let wid = resolved_worker.clone();
 
-            return py.allow_threads(|| {
+            return py.detach(|| {
                 self.runtime.block_on(async move {
                     // Try get_data_shard first; if coordinator has no registered workers yet,
                     // auto-register the worker id so standalone DatasetRegistry usage succeeds.
@@ -452,7 +452,7 @@ impl DatasetRegistry {
         let client_lock = self.client.clone();
         let target_url = url.to_string();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             self.runtime.block_on(async move {
                 {
                     let guard = client_lock.read().await;

@@ -130,7 +130,7 @@ impl CheckpointManager {
         let meta = metadata.unwrap_or_default();
         let inner = self.inner.clone();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             self.runtime.block_on(async move {
                 inner
                     .save_async(
@@ -195,11 +195,15 @@ impl CheckpointManager {
 
     /// Load checkpoint data by checkpoint ID (str) or step (int)
     #[pyo3(signature = (checkpoint_id_or_step))]
-    fn load(&self, py: Python<'_>, checkpoint_id_or_step: &Bound<'_, PyAny>) -> PyResult<PyObject> {
+    fn load(
+        &self,
+        py: Python<'_>,
+        checkpoint_id_or_step: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
         let ckpt_id = self.resolve_checkpoint_id(checkpoint_id_or_step)?;
         let inner = self.inner.clone();
 
-        let data = py.allow_threads(|| {
+        let data = py.detach(|| {
             self.runtime.block_on(async move {
                 inner.load(&ckpt_id).await.map_err(|e| {
                     pyo3::exceptions::PyIOError::new_err(format!(
@@ -210,7 +214,7 @@ impl CheckpointManager {
             })
         })?;
 
-        Ok(PyBytes::new_bound(py, &data).into())
+        Ok(PyBytes::new(py, &data).into())
     }
 
     /// Async load checkpoint data by checkpoint ID (str) or step (int)
@@ -228,8 +232,8 @@ impl CheckpointManager {
                 pyo3::exceptions::PyIOError::new_err(format!("Failed to load checkpoint: {}", e))
             })?;
 
-            Ok(Python::with_gil(|py| -> PyObject {
-                PyBytes::new_bound(py, &data).into()
+            Ok(Python::attach(|py| -> Py<PyAny> {
+                PyBytes::new(py, &data).into()
             }))
         })
     }
@@ -239,7 +243,7 @@ impl CheckpointManager {
         let inner = self.inner.clone();
         let ckpt_id = checkpoint_id.to_string();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             self.runtime.block_on(async move {
                 inner.delete(&ckpt_id).await.map_err(|e| {
                     pyo3::exceptions::PyIOError::new_err(format!(
@@ -307,7 +311,7 @@ impl CheckpointManager {
     fn wait_pending(&self, py: Python<'_>) -> PyResult<()> {
         let inner = self.inner.clone();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             self.runtime.block_on(async move {
                 inner.wait_pending().await.map_err(|e| {
                     pyo3::exceptions::PyIOError::new_err(format!(

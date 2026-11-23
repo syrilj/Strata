@@ -259,7 +259,7 @@ impl TrainingOrchestrator {
         let client_lock = self.client.clone();
         let url = self.coordinator_url.clone();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             self.runtime
                 .block_on(Self::get_or_connect_client(client_lock, url))
                 .map(|_| ())
@@ -297,7 +297,7 @@ impl TrainingOrchestrator {
         }
         let worker_id_store = self.worker_id.clone();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             self.runtime.block_on(async move {
                 let request = coordinator::proto::WorkerInfo {
                     worker_id: wid.clone(),
@@ -452,7 +452,7 @@ impl TrainingOrchestrator {
         let task = current_task.to_string();
         let last_commands = self.last_commands.clone();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             self.runtime.block_on(async move {
                 let status = coordinator::proto::WorkerStatus {
                     state: state_enum,
@@ -581,7 +581,7 @@ impl TrainingOrchestrator {
         let p = path.to_string();
         let fmt = format.to_string();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             self.runtime.block_on(async move {
                 let request = coordinator::proto::DatasetInfo {
                     dataset_id: did,
@@ -618,7 +618,7 @@ impl TrainingOrchestrator {
         let worker_id = self.get_worker_id_sync(py)?;
         let did = dataset_id.to_string();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             self.runtime.block_on(async move {
                 let request = coordinator::proto::ShardRequest {
                     worker_id,
@@ -665,7 +665,7 @@ impl TrainingOrchestrator {
         let ckpt_type = parse_checkpoint_type(checkpoint_type);
         let meta = metadata.unwrap_or_default();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             self.runtime.block_on(async move {
                 let request = coordinator::proto::CheckpointInfo {
                     worker_id,
@@ -702,7 +702,7 @@ impl TrainingOrchestrator {
         let worker_id = self.get_worker_id_sync(py).unwrap_or_default();
         let jid = job_id.to_string();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             self.runtime.block_on(async move {
                 let request = coordinator::proto::RecoveryRequest {
                     worker_id,
@@ -746,7 +746,7 @@ impl TrainingOrchestrator {
         let worker_id = self.get_worker_id_sync(py)?;
         let bid = barrier_id.to_string();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             self.runtime.block_on(async move {
                 let request = coordinator::proto::BarrierRequest {
                     worker_id,
@@ -822,7 +822,7 @@ impl TrainingOrchestrator {
         let mut grpc_client = self.get_client_sync(py)?;
         let worker_id = self.get_worker_id_sync(py)?;
 
-        py.allow_threads(|| {
+        py.detach(|| {
             self.runtime.block_on(async move {
                 let request = coordinator::proto::WorkerInfo {
                     worker_id,
@@ -887,7 +887,7 @@ impl TrainingOrchestrator {
     fn get_client_sync(&self, py: Python<'_>) -> PyResult<Client> {
         let client_lock = self.client.clone();
         let url = self.coordinator_url.clone();
-        py.allow_threads(|| {
+        py.detach(|| {
             self.runtime
                 .block_on(Self::get_or_connect_client(client_lock, url))
         })
@@ -895,7 +895,7 @@ impl TrainingOrchestrator {
 
     fn get_worker_id_sync(&self, py: Python<'_>) -> PyResult<String> {
         let worker_id = self.worker_id.clone();
-        py.allow_threads(|| {
+        py.detach(|| {
             self.runtime.block_on(async {
                 let guard = worker_id.read().await;
                 guard.clone().ok_or_else(|| {
