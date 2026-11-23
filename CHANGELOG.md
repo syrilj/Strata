@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Rust integration/e2e tests and the coordinator benchmark no longer require IPv6 (bind `127.0.0.1:0` instead of using `portpicker`)
+- Checkpoint benchmark now measures durable local writes (temp file + fsync + rename) and `save_async` call latency separately; the old version reported enqueue time as throughput
+
+### Changed
+- Removed performance numbers that were never measured from the README, docs and this changelog; added `BENCHMARKS.md` with measured single-machine results
+- Removed `docs/INTERVIEW_GUIDE.md`, `docs/SYSTEM_ARCHITECTURE.tex` and `tests/demos/demo.py`
+- Documented that S3 storage is not wired into the coordinator or Python API
+
 ### Planned
 - High-availability coordinator with Raft consensus
 - Delta checkpoint support for large models
@@ -31,14 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Minimal data movement during dynamic scaling
 
 - **Checkpoint Manager**: Async checkpoint persistence
-  - Non-blocking async writes
-  - Configurable storage backends (Local, S3)
+  - Non-blocking async writes (background Tokio task)
+  - Local storage backend
   - Atomic checkpoint writes with rename
   - Background I/O with Tokio
 
 - **Storage Backends**:
   - Local filesystem backend with atomic writes
-  - S3 backend with multipart upload support
+  - S3 backend with multipart upload support (library only, behind the `s3` feature; not used by the coordinator or Python API)
   - Storage abstraction trait for extensibility
 
 - **Python Bindings**: PyO3-based Python API
@@ -62,28 +71,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Documentation**:
   - Architecture deep dive
   - Complete API reference
-  - Deployment guide (Docker, Kubernetes, AWS)
-  - Interview preparation guide
+  - Deployment guide (Docker, Kubernetes)
 
-- **Benchmarks**:
-  - Checkpoint throughput benchmarks (500 MB/s local, 200 MB/s S3)
-  - Coordinator performance benchmarks (10K+ RPS)
+- **Benchmarks** (Criterion):
+  - Checkpoint write benchmarks
+  - Coordinator RPC benchmarks
   - Data loading and shard assignment benchmarks
-  - Consistent hash distribution analysis
-
-### Performance
-- Checkpoint writes: 500 MB/s to local NVMe SSD
-- S3 uploads: 200 MB/s with multipart upload
-- Coordinator throughput: 10,000+ requests/second
-- Barrier sync (100 workers): <50ms p99 latency
-- Shard assignment: <10ms for 1000 workers, 10K shards
+  - Consistent hash benchmarks
 
 ### Technical Details
 - Rust 2021 edition with Tokio async runtime
 - gRPC with Tonic for network communication
 - Protocol Buffers for service definitions
-- PyO3 for zero-copy Python bindings
-- DashMap for lock-free concurrent state management
+- PyO3 for Python bindings
+- DashMap (sharded locking) for concurrent state management
 - AWS SDK for S3 integration
 
 [Unreleased]: https://github.com/syrilj/Strata/compare/v0.1.0...HEAD

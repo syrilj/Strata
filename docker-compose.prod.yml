@@ -1,6 +1,9 @@
 version: '3.8'
 
-# Production deployment with S3 storage
+# Coordinator-only deployment.
+# NOTE: STORAGE_BACKEND=s3 is not supported by the coordinator yet; it logs a
+# warning and writes checkpoints to local disk inside the container, and no
+# volume is mounted here. See docs/DEPLOYMENT.md (S3 Status).
 # Usage: docker-compose -f docker-compose.prod.yml up -d
 
 services:

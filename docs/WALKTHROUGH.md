@@ -1,12 +1,14 @@
 # Strata Walkthrough
 
-This document demonstrates the functionality of Strata, highlighting the real-time dashboard and system coordination capabilities.
+This document tours the Strata dashboard.
+
+> **About the screenshots:** they show synthetic demo data: the same fixed cluster the coordinator serves with `DEMO_MODE=true` (`gpu-worker-01`, `gpu-worker-02`, `cpu-worker-01`, an "ImageNet Training Set" dataset, etc.) with generated metric values. None of the numbers visible in the screenshots are measurements. For measured numbers see [BENCHMARKS.md](../BENCHMARKS.md).
 
 ## Overview
 
 The walkthrough runs a local cluster with:
 - **Coordinator**: Rust-based gRPC service managing workers and state.
-- **Workers**: Simulated GPU and CPU nodes performing training tasks.
+- **Workers**: in live mode, local Python worker processes (`scripts/real_worker.py`); in demo mode, a fixed synthetic worker list.
 - **Dashboard**: React-based UI for real-time monitoring.
 
 ## 1. Dashboard Overview
@@ -17,8 +19,8 @@ The main dashboard provides a "cockpit" view of the entire cluster.
 
 **Key Metrics:**
 - **Active Workers**: Shows connected workers (e.g., `gpu-worker-01`, `cpu-worker-01`) and their status.
-- **Throughput**: Real-time checkpoint write speed (e.g., ~60 MB/s).
-- **Latency**: Barrier synchronization latency (<30ms).
+- **Checkpoint throughput**: checkpoint write rate reported by the coordinator (synthetic in demo mode).
+- **Barrier sync p99**: barrier wait latency reported by the coordinator (synthetic in demo mode).
 - **Training Progress**: Per-worker epoch and step counters.
 
 ## 2. Dataset Management

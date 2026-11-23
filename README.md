@@ -1,509 +1,190 @@
-# Strata — Distributed Training Data & Checkpoint Runtime
+# Strata
 
-[![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](https://www.rust-lang.org/)
-[![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
-[![React](https://img.shields.io/badge/react-18.3-blue.svg)](https://react.dev/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/syrilj/Strata/actions/workflows/ci.yml/badge.svg)](https://github.com/syrilj/Strata/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/syrilj/Strata)](https://github.com/syrilj/Strata/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A high-performance distributed runtime for coordinating data loading, checkpointing, and state persistence across hundreds to thousands of workers for large-scale ML training jobs.
+Strata is a coordination runtime for distributed ML training jobs. A Rust coordinator tracks workers, hands out dataset shards, runs barriers, and records checkpoints; training code talks to it through a Python package built with PyO3. A React dashboard shows coordinator state.
 
-**Strata** is the production-grade control plane: Rust + Tokio coordinator, gRPC worker mesh, S3/local checkpointing, Python API, and a real-time React dashboard.
+It is a working prototype that has been tested on a single machine. It has not been run on a multi-node cluster or at large worker counts. See [Current limits](#current-limits).
 
-**[Architecture](docs/ARCHITECTURE.md)** | **[API Docs](docs/API.md)** | **[Deployment Guide](docs/DEPLOYMENT.md)** | **[Interview Guide](docs/INTERVIEW_GUIDE.md)** | **[Security](SECURITY.md)** | **[Changelog](CHANGELOG.md)**
+## What it does
 
-## 🚀 Getting Started
-
-```bash
-# Quick start with Docker - runs coordinator + 4 simulated workers
-docker-compose up --build
-
-# Or just the coordinator (for development)
-cargo run -p coordinator
-```
-
-Then open http://localhost:3000 to see the real-time dashboard.
-
-**Run modes:**
-- **Seeded data** (`DEMO_MODE=true`): starts the real coordinator with a seeded development dataset — no cluster needed
-- **Live cluster**: real data from coordinator + workers
-
-## 📸 Screenshots
-
-| Overview | Tasks |
-|---|---|
-| ![Strata dashboard overview](docs/demo-images/dashboard_overview_1768519762262.png) | ![Strata tasks page](docs/demo-images/tasks_page_1768519812446.png) |
-
-| Datasets | Activity / Logs |
-|---|---|
-| ![Strata datasets page](docs/demo-images/datasets_page_1768519803685.png) | ![Strata activity page](docs/demo-images/activity_page_1768519821851.png) |
-
-More: `docs/demo-images/` (logs, settings). Screenshots captured from a live local cluster.
-
-## 🚀 Production Deployment
-
-### 1. Setup AWS S3 (for checkpoint storage)
-
-```bash
-# Configure AWS credentials
-aws configure
-
-# Create S3 bucket with lifecycle policies
-./scripts/setup-aws.sh
-```
-
-### 2. Configure Environment
-
-```bash
-cp .env.example .env
-# Edit .env with your AWS credentials and bucket name
-```
-
-### 3. Deploy with Docker
-
-```bash
-# Production deployment with S3 storage
-docker-compose -f docker-compose.prod.yml up -d
-```
-
-### 4. Or Deploy to Kubernetes
-
-```bash
-# Real, apply-ready manifests live in k8s/ (see docs/DEPLOYMENT.md)
-kubectl apply -k k8s/
-kubectl get pods -n strata
-```
-
-### Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `AWS_ACCESS_KEY_ID` | AWS access key | - |
-| `AWS_SECRET_ACCESS_KEY` | AWS secret key | - |
-| `AWS_REGION` | AWS region | `us-east-1` |
-| `CHECKPOINT_BUCKET` | S3 bucket for checkpoints | - |
-| `STORAGE_BACKEND` | `local` or `s3` | `local` |
-| `RUST_LOG` | Log level | `info` |
-
-## Performance Highlights
-
-- **Checkpoint Throughput**: 500 MB/s (local), 200 MB/s (S3)
-- **Coordinator Capacity**: 10,000+ requests/second
-- **Scalability**: Tested up to 1,000 workers
-- **Barrier Sync Latency**: <50ms p99 for 100 workers
-- **Shard Assignment**: <10ms for 1,000 workers, 10K shards
-
-## Features
-
-- **🚀 High-Performance I/O**: Async Rust core with Tokio for non-blocking operations (3x faster than baseline Python)
-- **🔄 Fault Tolerance**: Automatic checkpoint recovery and worker failure handling with consistent hashing
-- **📊 Distributed Data Loading**: Consistent hashing with virtual nodes for even distribution (<5% deviation)
-- **🐍 Pythonic API**: Simple Python interface powered by PyO3 with zero-copy data passing
-- **☁️ Cloud-Native**: S3-compatible storage with multipart upload support
-- **📡 gRPC Coordination**: HTTP/2-based worker coordination with connection pooling
-- **🧪 Production-Ready**: Comprehensive test suite, benchmarks, Docker/Kubernetes configs
-- **📈 Real-Time Dashboard**: React-based monitoring UI with live metrics and worker status
-- **🔒 Security**: Rate limiting, input validation, and request metrics
+- **Worker membership**: workers register over gRPC and send heartbeats. A background reaper removes workers that miss the heartbeat timeout (30 s by default), rebalances their shards, and re-evaluates any barrier they were part of.
+- **Dataset sharding**: a dataset is described by sample count and shard size. With `shuffle=true` (the default) shards are permuted with a seeded per-epoch shuffle and dealt round-robin by worker rank, so every worker can reproduce the same assignment. With `shuffle=false` shards are placed on a consistent-hash ring (150 virtual nodes per worker), so adding or removing a worker only moves the shards on the affected ring segments.
+- **Barriers**: named barriers that release once every active worker has arrived.
+- **Checkpoints**: `save` queues a write for a background Tokio task and returns. The local backend writes a temp file, fsyncs it, and renames it into place; LZ4 compression is optional. Workers report checkpoints to the coordinator, and a restarted worker can ask it for the latest one to resume from.
+- **HTTP API and dashboard**: a JSON API (`/api/health`, `/api/workers`, `/api/datasets`, `/api/checkpoints`, `/api/metrics`, …) and a React dashboard on top of it.
+- **Request guards**: per-client token-bucket rate limiting, input validation, and per-RPC request metrics.
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-    subgraph PY["Python API (PyO3)"]
+    subgraph PY["Python package dtruntime (PyO3)"]
+        TO[TrainingOrchestrator]
         DR[DatasetRegistry]
         CM[CheckpointManager]
-        TO[TrainingOrchestrator]
     end
-    subgraph RS["Rust Core (Tokio)"]
-        GRPC[gRPC Server]
-        CKPT[Checkpoint Manager]
-        SHARD[Data-Shard / Consistent Hash]
-        STORE[Storage S3-Local]
-        MW[Rate Limit + Validation + Metrics]
+    subgraph RS["Rust core (Tokio)"]
+        GRPC[Coordinator gRPC service - Tonic]
+        HTTP[HTTP JSON API - Axum]
+        SHARD[data-shard: seeded shuffle / hash ring]
+        CKPT[checkpoint: async writer]
+        STORE[storage: LocalStorage]
     end
-    subgraph OPS["Operations"]
-        W[Workers 100s-1000s]
-        DASH[React Dashboard]
-    end
-    DR --> GRPC
-    CM --> CKPT
-    TO --> GRPC
-    CKPT --> STORE
-    GRPC --- MW
-    GRPC <--> W
-    DASH -->|HTTP /api/dashboard 2s poll| GRPC
+    DASH[React dashboard]
+    TO -->|gRPC| GRPC
+    DR -->|gRPC or in-process| SHARD
+    CM --> CKPT --> STORE
+    GRPC --> SHARD
+    HTTP --- GRPC
+    DASH -->|HTTP polling| HTTP
 ```
 
-<details>
-<summary>Text fallback (no Mermaid renderer)</summary>
+| Crate | Role |
+|---|---|
+| `crates/coordinator` | gRPC service (`proto/coordinator.proto`), HTTP API, middleware, `coordinator` binary |
+| `crates/data-shard` | consistent-hash ring, epoch shuffling, `ShardManager` |
+| `crates/checkpoint` | checkpoint manager and background writer |
+| `crates/storage` | `StorageBackend` trait, `LocalStorage`, `S3Storage` (feature-gated and unused; see limits) |
+| `crates/runtime-core` | configuration, shared types, errors |
+| `crates/python-bindings` | PyO3 extension `dtruntime._core` |
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Python API Layer                          │
-│  ┌──────────────┐ ┌──────────────┐ ┌──────────────────────┐ │
-│  │DatasetRegistry│ │CheckpointMgr │ │TrainingOrchestrator │ │
-│  └──────────────┘ └──────────────┘ └──────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
-                           │ PyO3
-┌─────────────────────────────────────────────────────────────┐
-│                    Rust Core Runtime                         │
-│  ┌────────┐ ┌──────────┐ ┌───────────┐ ┌─────────────────┐  │
-│  │gRPC    │ │Checkpoint│ │Data Shard │ │Storage Backend  │  │
-│  │Server  │ │Manager   │ │Coordinator│ │(S3/Local)       │  │
-│  └────────┘ └──────────┘ └───────────┘ └─────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-                           │ Tokio Async I/O
-┌─────────────────────────────────────────────────────────────┐
-│              Worker Nodes (100s - 1000s)                     │
-└─────────────────────────────────────────────────────────────┘
-```
-</details>
+More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/API.md](docs/API.md).
 
-Full diagrams: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Print-ready spec: [docs/SYSTEM_ARCHITECTURE.tex](docs/SYSTEM_ARCHITECTURE.tex).
+## Current limits
 
-## Quick Start
+- **Single coordinator.** Not replicated or highly available. Worker, dataset, and barrier state lives in memory and is lost on restart (checkpoint files on disk are rescanned at startup).
+- **No authentication or TLS** on the gRPC or HTTP endpoints. Run it only on a trusted network.
+- **Local storage only in practice.** `S3Storage` exists in the `storage` crate behind the non-default `s3` feature, but the coordinator binary and the Python API do not use it. With `STORAGE_BACKEND=s3` the coordinator logs a warning and writes to local disk. `S3Storage` has unit tests for key/config handling only and has never been run against S3.
+- **Tested scale is small.** The largest test runs 8 simulated workers against one coordinator in one process. The "1000 workers" benchmark cases register 1000 IDs in an in-process data structure; they are not 1000 real workers.
+- **Checkpoint data is copied** once from Python `bytes` into Rust (not zero-copy).
+- The Docker Compose and Kubernetes files have not been verified in the latest cleanup.
 
-### Installation
+## Quick start
+
+Verified on Ubuntu 24.04 with Rust 1.97 and Python 3.13. `pyproject.toml` declares Python 3.9+.
+
+Prerequisites: Rust (stable, via `rustup`), `protoc` (`sudo apt-get install protobuf-compiler` on Debian/Ubuntu), Python 3.9+.
 
 ```bash
-# Clone the repository
 git clone https://github.com/syrilj/Strata.git
 cd Strata
+```
 
-# Build Rust components
-cargo build --release
+Build and start the coordinator (gRPC on 50051, HTTP API on 51051):
 
-# Install Python package
+```bash
+cargo run --release -p coordinator --bin coordinator -- 127.0.0.1:50051
+```
+
+In a second terminal, check it is up, install the Python package, and run the example worker:
+
+```bash
+curl http://127.0.0.1:51051/api/health
+```
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+```
+
+```bash
 pip install -e ".[dev]"
 ```
 
-### Start Coordinator
-
 ```bash
-# Terminal 1: Start coordinator server
-cargo run --release -p coordinator --bin coordinator -- 0.0.0.0:50051
+python examples/quickstart.py
 ```
 
-### Run Training Worker
+Expected output (IDs, paths and the shard range will differ):
+
+```
+registered worker-0
+epoch 0, first assigned shard: samples [30000, 40000) (dataset has 10 shards)
+step 10: checkpoint ckpt-10-… -> /tmp/strata-ckpt-…/ckpt-10-….ckpt
+step 20: checkpoint ckpt-20-… -> /tmp/strata-ckpt-…/ckpt-20-….ckpt
+step 30: checkpoint ckpt-30-… -> /tmp/strata-ckpt-…/ckpt-30-….ckpt
+coordinator's latest checkpoint: step 30, payload b'model-state-at-step-30'
+barrier released: True
+deregistered
+```
+
+The core of [`examples/quickstart.py`](examples/quickstart.py):
 
 ```python
-# train.py
-import asyncio
-from dtruntime import DatasetRegistry, CheckpointManager, TrainingOrchestrator
+from dtruntime import CheckpointManager, TrainingOrchestrator
 
-async def main():
-    # Initialize orchestrator
-    orch = TrainingOrchestrator(
-        worker_id="worker-0",
-        coordinator_url="http://localhost:50051",
-        world_size=1,
-        rank=0
-    )
-    
-    # Register worker
-    await orch.register_worker(ip="127.0.0.1", port=8080)
-    
-    # Register dataset
-    registry = DatasetRegistry("http://localhost:50051")
-    registry.register(
-        "training_data",
-        path="/data/training",
-        format="parquet",
-        total_samples=100_000,
-        shard_size=10_000,
-        shuffle=True
-    )
-    
-    # Get shard for this worker
-    shard_files = registry.get_shard("training_data", worker_rank=0, epoch=0)
-    print(f"Assigned {len(shard_files)} shards")
-    
-    # Setup checkpointing
-    ckpt_mgr = CheckpointManager("/tmp/checkpoints")
-    
-    # Training loop
-    for step in range(1000):
-        # Simulate training
-        data = f"step_{step}".encode()
-        
-        # Async checkpoint (non-blocking)
-        if step % 100 == 0:
-            await ckpt_mgr.save_async(data, step=step)
-            print(f"Checkpoint saved at step {step}")
-    
-    print("Training complete!")
+orch = TrainingOrchestrator("http://127.0.0.1:50051", worker_id="worker-0", world_size=1, rank=0)
+orch.register_worker(hostname="127.0.0.1", port=50060)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+orch.register_dataset(dataset_id="train", path="/tmp/strata-quickstart-data",
+                      total_samples=100_000, shard_size=10_000, shuffle=True, seed=42)
+shard = orch.get_shard("train", epoch=0)
+
+ckpts = CheckpointManager("/tmp/my-checkpoints")
+ckpt_id = ckpts.save(b"model state", step=10, epoch=0)  # queues a background write
+ckpts.wait_pending()                                    # block until it is on disk
+info = ckpts.get_by_step(10)
+orch.notify_checkpoint(checkpoint_id=ckpt_id, step=10, epoch=0,
+                       storage_path=info.path, size_bytes=len(b"model state"))
+
+orch.barrier("done", step=10)
+orch.deregister()
 ```
+
+In async code, `await ckpts.save_async(data, step=...)` resolves once the write is on disk.
+
+To run the coordinator, local workers and the dashboard together, see `./run-local.sh` and [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md).
+
+## Performance
+
+Measured on one 4-vCPU cloud VM with local ext4 storage. The full tables, the command, and what each benchmark times are in **[BENCHMARKS.md](BENCHMARKS.md)**. There are no multi-node, GPU, or S3 measurements.
+
+| Measurement | Result |
+|---|---|
+| Durable local checkpoint write (temp file + fsync + rename), 1 MB / 10 MB / 100 MB | 2.15 ms / 13.1 ms / 137 ms (443 / 726 / 698 MiB/s) |
+| 8 concurrent 1 MB durable writes | 9.19 ms total (830 MiB/s) |
+| Time the caller is blocked by Rust `save_async` (queue only), 10 MB | 11.0 µs |
+| gRPC `RegisterWorker`, including opening a new connection | 6.00 ms |
+| gRPC barrier with 8 participants, including connections | 37.2 ms |
+| Hash-ring key lookup (10 nodes) | 49.5 ns |
+| Build in-process shard assignment for 1000 worker IDs × 10,000 shards | 77.8 ms |
+
+## Tests
 
 ```bash
-# Terminal 2: Run training script
-python train.py
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all
+pytest tests/python -v      # in the venv above; starts the coordinator binary itself
 ```
 
-## Key Design Decisions
+On the machine in BENCHMARKS.md: `cargo test --all` passes 85 tests (1 doc test ignored), `pytest` passes 19 tests, and the dashboard's `npm test` passes 20 tests. The Rust tests include gRPC integration tests and an end-to-end simulation with up to 8 workers covering shard distribution, barriers, checkpoint recovery, and worker failure.
 
-### 1. Why Rust?
+CI (`.github/workflows/ci.yml`) runs formatting, clippy, Rust tests on Linux and macOS, the Python tests, and the dashboard type-check, lint, tests and build.
 
-- **Performance**: Zero-cost abstractions, no GC pauses → 3x throughput vs Python baseline
-- **Safety**: Ownership system prevents data races at compile time
-- **Async I/O**: Tokio runtime handles 10K+ concurrent connections efficiently
-- **FFI**: PyO3 enables seamless Python integration with zero-copy data passing
+## Dashboard
 
-### 2. Why Consistent Hashing?
+The dashboard (`dashboard/`) polls the coordinator's HTTP API. The screenshots below show **synthetic demo data** (`DEMO_MODE=true`), not measurements.
 
-Traditional modulo hashing (`shard % num_workers`) reassigns all shards when workers change. Consistent hashing with virtual nodes:
-- Only ~1/N shards move when adding/removing workers
-- Achieves <5% load imbalance with 150 virtual nodes per worker
-- Enables deterministic shard assignment without central coordination
+| Overview | Tasks |
+|---|---|
+| ![Strata dashboard overview](docs/demo-images/dashboard_overview_1768519762262.png) | ![Strata tasks page](docs/demo-images/tasks_page_1768519812446.png) |
 
-### 3. Why Async Checkpointing?
-
-Synchronous checkpoint writes block training for seconds. Our async design:
-- Serializes state synchronously (~100ms)
-- Spawns background Tokio task for I/O
-- Returns immediately to continue training
-- Measured: 500 MB/s local, 200 MB/s S3 with multipart upload
-
-## Benchmark Results
-
-All benchmarks run on AWS p3.16xlarge (8x V100, 64 vCPU, 488 GB RAM).
-
-### Checkpoint Throughput
-
-| Checkpoint Size | Local (NVMe) | S3 (Multipart) |
-|----------------|--------------|----------------|
-| 1 MB           | 520 MB/s     | 195 MB/s       |
-| 10 MB          | 510 MB/s     | 198 MB/s       |
-| 100 MB         | 505 MB/s     | 202 MB/s       |
-
-**Concurrent Writes** (1 MB checkpoints):
-- 1 worker: 520 MB/s
-- 4 workers: 1.95 GB/s (linear scaling)
-- 8 workers: 3.8 GB/s (near-linear)
-
-### Coordinator Performance
-
-| Operation            | Throughput  | p50 Latency | p99 Latency |
-|---------------------|-------------|-------------|-------------|
-| Worker Registration | 1,200 ops/s | 0.8 ms      | 2.1 ms      |
-| Heartbeat           | 11,500 ops/s| 0.3 ms      | 1.2 ms      |
-| Get Data Shard      | 8,900 ops/s | 0.5 ms      | 3.8 ms      |
-| Barrier Sync (100)  | 180 ops/s   | 5.2 ms      | 48 ms       |
-
-### Data Shard Assignment
-
-**Shard Distribution Quality** (1000 workers, 10K shards):
-- Mean shards/worker: 10.0
-- Std deviation: 0.42 (4.2% of mean)
-- Min: 9 shards
-- Max: 11 shards
-
-**Rebalancing** (add 1 worker to 100-worker cluster):
-- Shards moved: 98 / 10,000 (0.98%)
-- Assignment time: 8.2 ms
-
-### Scalability Tests
-
-| Workers | Total Shards | Assignment Time | Memory Usage |
-|---------|--------------|-----------------|--------------|
-| 10      | 1,000        | 1.2 ms          | 8 MB         |
-| 100     | 10,000       | 8.4 ms          | 42 MB        |
-| 1,000   | 100,000      | 92 ms           | 380 MB       |
-
-Run benchmarks yourself:
-```bash
-cargo bench --bench checkpoint_throughput
-cargo bench --bench coordinator
-cargo bench --bench data_loading
-```
+More screenshots and how to run it: [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md).
 
 ## Documentation
 
-- **[Architecture Deep Dive](docs/ARCHITECTURE.md)**: System design, component interactions, design decisions
-- **[API Reference](docs/API.md)**: Complete Python and Rust API documentation
-- **[Deployment Guide](docs/DEPLOYMENT.md)**: Docker, Kubernetes, AWS deployment instructions
-- **[Interview Guide](docs/INTERVIEW_GUIDE.md)**: Design decisions, trade-offs, common interview questions
-- **[Contributing](CONTRIBUTING.md)**: Development workflow, code style, PR process
-- **[Changelog](CHANGELOG.md)**: Version history and changes
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) – design, request flows, failure handling
+- [docs/API.md](docs/API.md) – Python, HTTP, gRPC and Rust APIs
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) – building, configuration, Docker and Kubernetes (unverified), S3 status
+- [BENCHMARKS.md](BENCHMARKS.md) – measured results
+- [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CHANGELOG.md](CHANGELOG.md)
 
-## Project Structure
+## How this was built
 
-```
-strata/
-├── LICENSE                  # MIT License
-├── SECURITY.md                # Security policy
-├── CODE_OF_CONDUCT.md         # Contributor Covenant
-├── Cargo.toml                 # Rust workspace configuration
-├── rust-toolchain.toml        # Pinned Rust 1.75 + fmt/clippy
-├── pyproject.toml             # Python package configuration
-├── k8s/                       # Kubernetes manifests (apply with kubectl apply -k k8s/)
-│   ├── coordinator.yaml       # Coordinator Deployment + Service (50051/51051/3000)
-│   ├── workers.yaml           # Worker Deployment (4 replicas) + HPA
-│   ├── configmap.yaml         # Non-secret config
-│   ├── secret.example.yaml    # S3 creds template (fill → secret.yaml, gitignored)
-│   ├── pvc.yaml               # Checkpoint storage (local backend)
-│   └── ingress.yaml           # strata.local: / → 3000, /api → 51051
-├── proto/                     # Protocol Buffers definitions
-│   └── coordinator.proto      # gRPC service definitions
-├── crates/                    # Rust crates
-│   ├── runtime-core/          # Core runtime & worker management
-│   ├── checkpoint/            # Async checkpoint manager
-│   ├── data-shard/            # Consistent hashing & sharding
-│   ├── storage/               # Storage backend abstraction
-│   ├── coordinator/           # gRPC coordinator service
-│   └── python-bindings/       # PyO3 FFI bindings
-├── python/
-│   └── dtruntime/             # Python API package
-├── scripts/                   # Production scripts
-│   ├── simulated_worker.py    # Docker worker simulation
-│   ├── real_worker.py         # Real training worker
-│   ├── api_load_test.py       # HTTP API load tester (p50/p99)
-│   ├── setup-aws.sh           # AWS S3 setup
-│   └── start_services.sh      # Service orchestration
-├── examples/                  # Usage examples
-│   ├── real_training.py       # Full training example
-│   └── real_training_simple.py # Minimal example
-├── tests/                     # All tests
-│   ├── rust/                  # Rust integration tests
-│   ├── python/                # Python test suite
-│   └── demos/                 # Seeded training scenarios
-│       ├── demo.py            # Seeded multi-worker training run
-│       ├── test_training.py   # Multi-worker test
-│       └── distributed_task.py # Distributed decryption demo
-├── dashboard/                 # React monitoring UI
-│   └── src/
-│       └── components/
-│           ├── DataPreview.tsx # Training data visualization
-│           └── ...
-├── benchmarks/                # Criterion benchmarks
-│   ├── checkpoint_throughput.rs
-│   ├── coordinator.rs
-│   └── data_loading.rs
-└── docs/                      # Documentation
-    ├── ARCHITECTURE.md
-    ├── API.md
-    ├── DEPLOYMENT.md
-    └── INTERVIEW_GUIDE.md
-```
-
-## Tech Stack
-
-### Core Runtime
-- **Rust 1.75+**: Systems programming language
-- **Tokio**: Async runtime with work-stealing scheduler
-- **Tonic**: gRPC framework for Rust
-- **Protocol Buffers**: Service definition language
-
-### Python Integration
-- **PyO3**: Rust ↔ Python FFI with zero-copy support
-- **pyo3-async-runtimes**: Async/await bridge between Tokio and asyncio
-
-### Storage
-- **AWS SDK for Rust**: S3 integration with multipart upload
-- **Local Backend**: Atomic file operations with rename
-
-### Testing & Benchmarking
-- **Criterion**: Statistical benchmarking framework
-- **pytest**: Python testing framework
-- **tokio-test**: Async test utilities
-
-## Development
-
-### Run Tests
-
-```bash
-# All Rust tests
-cargo test --all
-
-# Python tests (requires coordinator running)
-pytest tests/python/ -v
-
-# Integration tests
-cargo test -p integration-tests
-
-# With coverage
-cargo install cargo-tarpaulin
-cargo tarpaulin --out Html
-```
-
-### Run Benchmarks
-
-```bash
-# All benchmarks
-cargo bench
-
-# Specific benchmark
-cargo bench --bench checkpoint_throughput
-
-# Generate flamegraph
-cargo install flamegraph
-cargo flamegraph --bench coordinator
-
-# Save baseline for comparison
-cargo bench -- --save-baseline main
-# After changes:
-cargo bench -- --baseline main
-```
-
-### Code Quality
-
-```bash
-# Format code
-cargo fmt --all
-
-# Lint
-cargo clippy --all-targets --all-features
-
-# Check for vulnerabilities
-cargo audit
-
-# Generate docs
-cargo doc --no-deps --open
-```
-
-## Use Cases
-
-This runtime is designed for:
-
-1. **Large-Scale Model Training**: Coordinate 100s-1000s of GPU workers
-2. **Fault-Tolerant Training**: Automatic recovery from worker failures
-3. **Efficient Data Loading**: Minimize data movement during scaling
-4. **Production ML Platforms**: Building distributed training infrastructure
-
-**Example scenarios**:
-- Training GPT-style models across multi-node GPU clusters
-- Distributed reinforcement learning with hundreds of workers
-- Large-scale computer vision training (ImageNet, COCO)
-- ML platform infrastructure for research labs
-
-## Limitations & Future Work
-
-**Current Limitations**:
-- Single coordinator (not HA)
-- No multi-tenancy support
-- Limited storage backends (Local, S3 only)
-- No built-in authentication/authorization
-
-**Planned Enhancements**:
-- High-availability coordinator with Raft consensus
-- Delta checkpointing for large models (90% size reduction)
-- OpenTelemetry integration for distributed tracing
-- GCS and Azure Blob storage backends
-- Multi-job scheduling and resource quotas
-
-See [CHANGELOG.md](CHANGELOG.md) for version history and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed design discussion.
-
-## Contributing
-
-Contributions welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for:
-- Development setup
-- Code style guidelines
-- Testing requirements
-- Pull request process
+I designed the architecture and wrote the specifications for the components (coordinator, sharding, checkpointing, Python API). Coding agents, GitHub Copilot's coding agent and Claude Code, wrote much of the implementation, which I reviewed.
 
 ## License
 
-MIT License — Copyright (c) 2026 Syril Jacob. See [LICENSE](LICENSE) for details.
+MIT. See [LICENSE](LICENSE).
